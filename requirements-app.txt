@@ -1,0 +1,3 @@
+# Optional UI dependencies (streamlit_app.py)
+streamlit>=1.28.0
+matplotlib>=3.7.0
