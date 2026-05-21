@@ -59,13 +59,13 @@ def create_exp_weights(input_path=INPUT_PATH, output_path=EXP_OUTPUT_PATH):
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Create log/exp transformed weight JSONs.")
     parser.add_argument("--input", dest="input_path", default=INPUT_PATH, help="Path to optimized weights JSON")
-    parser.add_argument("--log-out", dest="log_out", default=None, help="Output path for log weights JSON")
-    parser.add_argument("--exp-out", dest="exp_out", default=None, help="Output path for exp weights JSON")
+    parser.add_argument("--log_out", dest="log_out", default=None, help="Output path for log weights JSON")
+    parser.add_argument("--exp_out", dest="exp_out", default=None, help="Output path for exp weights JSON")
     parser.add_argument(
-        "--out-dir",
+        "--out_dir",
         dest="out_dir",
         default=None,
-        help="Output directory (writes log_weights.json and exp_weights.json). Ignored if --log-out/--exp-out are set.",
+        help="Output directory (writes log_weights.json and exp_weights.json). Ignored if --log_out/--exp_out are set.",
     )
     return parser
 

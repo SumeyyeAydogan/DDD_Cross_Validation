@@ -1,8 +1,6 @@
 import json
 import os
 os.environ["PYTHONHASHSEED"] = "42"
-os.environ["TF_DETERMINISTIC_OPS"] = "1"
-os.environ["TF_CUDNN_DETERMINISTIC"] = "1"
 from pathlib import Path
 import sys
 import random
@@ -20,8 +18,8 @@ from auto_optimize_gradcam_weights import compute_fold_weights, plot_weights, sa
 from log_exp_script import create_exp_weights, create_log_weights
 from src.fold_functions import load_fold_datasets
 
-def _set_global_determinism(seed: int) -> None:
-    """Set Python/NumPy/TensorFlow seeds and request deterministic TF ops."""
+def _set_global_seeds(seed: int) -> None:
+    """Set Python/NumPy/TensorFlow seeds"""
     random.seed(seed)
     np.random.seed(seed)
     tf.keras.utils.set_random_seed(seed)
@@ -33,7 +31,7 @@ if gpus:
         tf.config.experimental.set_memory_growth(gpu, True)
         
 
-BASE_RUN_NAME = "ddd_cv_30_eagerly_false_set-seed_pre-model"
+BASE_RUN_NAME = "baseline"
 dataset_dir = os.path.join(project_root, "dataset")
 fold_dataset_dir = os.path.join(project_root, "fold_datasets")
 runs_root = os.path.join(str(project_root), "runs")
@@ -41,7 +39,7 @@ output_weights_path = os.path.join(project_root, "weights")
 os.makedirs(fold_dataset_dir, exist_ok=True)
 os.makedirs(output_weights_path, exist_ok=True)
 K = 5
-_set_global_determinism(42)
+_set_global_seeds(42)
 
 # ddd_cv/weights — portable relative to project root (same layout on any machine).
 ONE_OFF_READ_WEIGHTS_DIR = str(project_root / "weights")

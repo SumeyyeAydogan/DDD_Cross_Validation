@@ -3,4 +3,5 @@
 /REPRODUCIBILITY_AND_TRAINING_NOTES_EN.md
 /runs
 /weights
+/weights_percentile
 /__pycache__

@@ -33,9 +33,8 @@ CONFIG = {
     "fold_start": 1,
     "fold_count": 5,
     "img_size": (224, 224),
-    "background_mask_value": 0.2,
-    "roi_padding_px": 12,
-    "roi_keep_aspect_pad_x_min_scale": 0.2,
+    "background_mask_value": 0.0,
+    "landmark_box_half_size": 12,
     "save_fold_detail_csv": False,
     "save_gradcam_samples": True,
     "gradcam_samples_per_group": 30,
@@ -733,8 +732,8 @@ def run_fold_overlap_analysis(
         mask = create_landmark_mask(
             image_uint8,
             img_size,
-            background_value=float(CONFIG.get("background_mask_value", 0.0)),
-            landmark_box_half_size=int(CONFIG.get("roi_padding_px", 12)),
+            background_mask_value=float(CONFIG.get("background_mask_value", 0.0)),
+            landmark_box_half_size=int(CONFIG.get("landmark_box_half_size", 12)),
         )
         face_ok = int(mask is not None)
         true_label = int(labels_from_paths([image_path], _CLASS_NAMES)[0])

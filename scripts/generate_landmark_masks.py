@@ -24,18 +24,17 @@ from PIL import Image, UnidentifiedImageError
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
-from src.mask_helpers import create_landmark_mask
+from src.mask_helpers import create_landmark_mask, image_to_uint8_rgb, img_size_from_rgb
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
 
-
-def apply_mask_to_image(img: Image.Image, mask: np.ndarray, background_value: float) -> Image.Image:
+def apply_mask_to_image(img: Image.Image, mask: np.ndarray, background_mask_value: float) -> Image.Image:
     img_np = np.array(img).astype(np.float32) / 255.0
     if mask.ndim == 2:
         mask_3 = np.stack([mask] * 3, axis=-1)
     else:
         mask_3 = mask
-    bg = float(background_value)
+    bg = float(background_mask_value)
     masked = img_np * mask_3 + (1.0 - mask_3) * bg
     out_np = (np.clip(masked, 0.0, 1.0) * 255).astype(np.uint8)
     return Image.fromarray(out_np)
@@ -45,8 +44,8 @@ def process_one_image(
     src_path: Path,
     dst_path: Path,
     *,
-    box_half_size: int,
-    background_value: float,
+    landmark_box_half_size: int,
+    background_mask_value: float,
 ) -> None:
     try:
         img = Image.open(src_path).convert("RGB")
@@ -54,12 +53,14 @@ def process_one_image(
         print(f"[WARN] Skipping unreadable image: {src_path} ({e})")
         return
 
-    img_np = np.array(img)
+    image_rgb_uint8 = image_to_uint8_rgb(np.array(img))
+    img_size = img_size_from_rgb(image_rgb_uint8)
+
     mask = create_landmark_mask(
-        img_np,
-        img_np.shape[:2],
-        background_value=0.0,
-        landmark_box_half_size=box_half_size,
+        image_rgb_uint8,
+        img_size,
+        landmark_box_half_size=landmark_box_half_size,
+        background_mask_value=background_mask_value,
     )
     if mask is None:
         dst_path.parent.mkdir(parents=True, exist_ok=True)
@@ -67,7 +68,7 @@ def process_one_image(
         print(f"[WARN] No face detected, copied original: {src_path}")
         return
 
-    masked_img = apply_mask_to_image(img, mask, background_value)
+    masked_img = apply_mask_to_image(img, mask, background_mask_value)
     dst_path.parent.mkdir(parents=True, exist_ok=True)
     masked_img.save(dst_path)
     print(f"[OK] Processed: {src_path} -> {dst_path}")
@@ -78,8 +79,8 @@ def run_flat(
     target_root: Path,
     classes: Sequence[str],
     *,
-    box_half_size: int,
-    background_value: float,
+    landmark_box_half_size: int,
+    background_mask_value: float,
 ) -> None:
     for cls in classes:
         src_dir = source_root / cls
@@ -91,7 +92,12 @@ def run_flat(
                 continue
             rel = Path(cls) / p.relative_to(src_dir)
             dst_path = target_root / rel
-            process_one_image(p, dst_path, box_half_size=box_half_size, background_value=background_value)
+            process_one_image(
+                p,
+                dst_path,
+                landmark_box_half_size=landmark_box_half_size,
+                background_mask_value=background_mask_value,
+            )
 
 
 def run_split(
@@ -100,8 +106,8 @@ def run_split(
     splits: Sequence[str],
     classes: Sequence[str],
     *,
-    box_half_size: int,
-    background_value: float,
+    landmark_box_half_size: int,
+    background_mask_value: float,
 ) -> None:
     for split in splits:
         for cls in classes:
@@ -114,7 +120,12 @@ def run_split(
                     continue
                 rel = Path(split) / Path(cls) / p.relative_to(src_dir)
                 dst_path = target_root / rel
-                process_one_image(p, dst_path, box_half_size=box_half_size, background_value=background_value)
+                process_one_image(
+                    p,
+                    dst_path,
+                    landmark_box_half_size=landmark_box_half_size,
+                    background_mask_value=background_mask_value,
+                )
 
 
 def detect_layout(source_root: Path, classes: Sequence[str]) -> str:
@@ -154,8 +165,8 @@ def parse_args() -> argparse.Namespace:
         default="train,val,test",
         help="Comma splits for --layout split (ignored for flat).",
     )
-    p.add_argument("--box-half-size", type=int, default=12)
-    p.add_argument("--background-value", type=float, default=0.0)
+    p.add_argument("--landmark_box_half_size", type=int, default=12)
+    p.add_argument("--background_mask_value", type=float, default=0.0)
     p.add_argument(
         "--classes",
         type=str,
@@ -184,7 +195,13 @@ def main() -> None:
     print(f"[INFO] target: {target}")
 
     if layout == "flat":
-        run_flat(source, target, classes, box_half_size=args.box_half_size, background_value=args.background_value)
+        run_flat(
+            source,
+            target,
+            classes,
+            landmark_box_half_size=args.landmark_box_half_size,
+            background_mask_value=args.background_mask_value,
+        )
     else:
         splits = [s.strip() for s in args.splits.split(",") if s.strip()]
         run_split(
@@ -192,8 +209,8 @@ def main() -> None:
             target,
             splits,
             classes,
-            box_half_size=args.box_half_size,
-            background_value=args.background_value,
+            landmark_box_half_size=args.landmark_box_half_size,
+            background_mask_value=args.background_mask_value,
         )
 
     print("\n[DONE] Landmark-masked dataset written under:")

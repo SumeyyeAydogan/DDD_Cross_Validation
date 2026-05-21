@@ -5,7 +5,7 @@ from typing import List, Sequence, Tuple
 import tensorflow as tf
 
 
-def get_analysis_pipeline_from_data_dir(
+def get_dataset_with_paths(
     data_dir: str,
     img_size: Tuple[int, int],
     class_names: Sequence[str] = ("NotDrowsy", "Drowsy"),

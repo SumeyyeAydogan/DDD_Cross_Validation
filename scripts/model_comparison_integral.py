@@ -12,10 +12,10 @@ project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.gradcam import CustomGradCAM
-from src.analysis_pipeline import get_analysis_pipeline_from_data_dir
+from src.ds_with_paths_pipeline import get_dataset_with_paths
 from src.fold_functions import load_fold_manifest
 from src.cv_dataloader import make_tf_dataset_from_paths
-from src.mask_helpers import create_landmark_mask, ROI_IDX
+from src.mask_helpers import create_landmark_mask, image_to_float01_rgb, image_to_uint8_rgb, ROI_IDX
 from src.focus_metrics import compute_focus_ratio, histogram_right_tail_area
 
 # (plot label, run directory name under project_root/runs/) — cv_main layout:
@@ -56,8 +56,8 @@ CONFIG: Dict[str, Any] = {
 
     "class_names": ["NotDrowsy", "Drowsy"],
 
-    "background_mask_value": 0.2,
-    "roi_padding_px": 12,
+    "background_mask_value": 0.0,
+    "landmark_box_half_size": 12,
 
     "threshold_source": "baseline_median",
 
@@ -65,6 +65,10 @@ CONFIG: Dict[str, Any] = {
     "plot_fixed_x_range": True,
     "plot_x_min": 0.0,
     "plot_x_max": 1.0,
+
+    #Gradcam Source
+
+    "gradcam_class_source": "model_prediction"
 }
 
 MODEL_CONFIGS = _default_model_configs()
@@ -84,13 +88,14 @@ def _collect_focus_ratios_core(model, image_batches, total_items, img_size):
         total += 1
         image = images[0].numpy()
 
-        image_uint8 = (image * 255.0).astype(np.uint8) if image.max() <= 1.0 else image.astype(np.uint8)
-        image_norm = image_uint8 / 255.0
+        image_rgb_uint8 = image_to_uint8_rgb(image)
+        image_float01 = image_to_float01_rgb(image)
 
-        prob = float(model.predict(image_norm[None, ...], verbose=0)[0][0])
+        # prediction -> class_idx for gradcam
+        prob = float(model.predict(image_float01[None, ...], verbose=0)[0][0])
         pred = 1 if prob >= 0.5 else 0
 
-        heatmap = gradcam.compute_heatmap(image_norm, class_idx=pred)
+        heatmap = gradcam.compute_heatmap(image_float01, class_idx=pred)
         heatmap = tf.image.resize(
             heatmap[..., None],
             img_size,
@@ -99,10 +104,10 @@ def _collect_focus_ratios_core(model, image_batches, total_items, img_size):
         ).numpy()[..., 0]
 
         mask = create_landmark_mask(
-            image_uint8,
+            image_rgb_uint8,
             img_size,
-            background_value=float(CONFIG.get("background_mask_value", 0.0)),
-            landmark_box_half_size=int(CONFIG.get("roi_padding_px", 12)),
+            background_mask_value=float(CONFIG.get("background_mask_value", 0.0)),
+            landmark_box_half_size=int(CONFIG.get("landmark_box_half_size", 12)),
         )
         if mask is not None:
             face_ok += 1
@@ -120,13 +125,13 @@ def _collect_focus_ratios_core(model, image_batches, total_items, img_size):
     return ratios, stats
 
 
-def collect_focus_ratios(model, data_dir, img_size, class_names):
+def collect_pred_class_focus_ratios_for_model(model, data_dir, img_size, class_names):
     """
     Returns:
       focus_ratios: np.array (only face_ok==1)
       stats: dict with N_total, N_face, face_rate
     """
-    ds, file_paths = get_analysis_pipeline_from_data_dir(data_dir, img_size)
+    ds, file_paths = get_dataset_with_paths(data_dir, img_size, class_names)
 
     def _image_batches():
         for data_batch, _path_batch in ds:
@@ -592,8 +597,8 @@ def _compute_fold_summary_rows(
             "N_face": stats_by_model[label]["N_face"],
             "face_rate": stats_by_model[label]["face_rate"],
             "mask": {
-                "roi": "mouth_jaw",
-                "roi_padding_px": cfg["roi_padding_px"],
+                "roi": "eye_mouth",
+                "landmark_box_half_size": cfg["landmark_box_half_size"],
                 "background_mask_value": cfg["background_mask_value"],
                 "roi_landmark_count": len(ROI_IDX),
             },
@@ -910,7 +915,7 @@ if __name__ == "__main__":
             continue
         model = tf.keras.models.load_model(model_path, compile=False)
         print(f"[RUN] Collecting focus ratios for {label} ...")
-        ratios, stats = collect_focus_ratios(model, data_dir, img_size, cfg["class_names"])
+        ratios, stats = collect_pred_class_focus_ratios_for_model(model, data_dir, img_size, cfg["class_names"])
         ratios_by_model[label] = ratios
         stats_by_model[label] = stats
 

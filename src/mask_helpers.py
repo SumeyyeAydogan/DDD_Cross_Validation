@@ -18,11 +18,37 @@ _face_mesh = mp.solutions.face_mesh.FaceMesh(
     min_detection_confidence=0.5,
 )
 
+def image_to_uint8_rgb(image: np.ndarray) -> np.ndarray:
+    """
+    Convert an HxWx3 RGB array to uint8 (0-255) for MediaPipe FaceMesh.
 
+    Accepts float images in [0, 1] or [0, 255] and uint8 inputs unchanged.
+    """
+    arr = np.asarray(image)
+    if arr.ndim != 3 or arr.shape[-1] != 3:
+        raise ValueError(f"Expected HxWx3 RGB image, got shape {arr.shape}")
+    if arr.dtype == np.uint8:
+        return arr
+    arr = arr.astype(np.float32)
+    if arr.max() <= 1.0:
+        arr = arr * 255.0
+    return np.clip(arr, 0, 255).astype(np.uint8)
+
+
+def image_to_float01_rgb(image: np.ndarray) -> np.ndarray:
+    """Convert an HxWx3 RGB array to float32 in [0, 1] for Keras / GradCAM."""
+    return image_to_uint8_rgb(image).astype(np.float32) / 255.0
+
+
+def img_size_from_rgb(image_rgb_uint8: np.ndarray) -> Tuple[int, int]:
+    """Return (height, width) — same convention as dataloader ``img_size=(H, W)``."""
+    h, w = image_rgb_uint8.shape[:2]
+    return (int(h), int(w))
+    
 def create_landmark_mask(
     image_np_uint8: np.ndarray,
     img_size: Tuple[int, int],
-    background_value: float = 0.0,
+    background_mask_value: float = 0.0,
     landmark_box_half_size: int = 12,
 ) -> Optional[np.ndarray]:
     """
@@ -31,7 +57,7 @@ def create_landmark_mask(
     Args:
         image_np_uint8: (H, W, 3) RGB uint8 numpy array (already at img_size)
         img_size: Target image size (height, width)
-        background_value: background fill value outside ROI boxes
+        background_mask_value: background fill value outside ROI boxes
         landmark_box_half_size: half side length for each landmark square ROI
     
     Returns:
@@ -39,7 +65,7 @@ def create_landmark_mask(
         Returns None if no face detected
     """
     h, w = img_size
-    bg = float(background_value)
+    bg = float(background_mask_value)
     box_half_size = int(landmark_box_half_size)
     
     # MediaPipe expects RGB uint8 array
@@ -68,13 +94,13 @@ def create_landmark_mask(
 
 def create_static_mask(
     img_size: Tuple[int, int],
-    background_value: float = 0.0,
+    background_mask_value: float = 0.0,
 ) -> np.ndarray:
     """
     Create simple static eye+mouth ROI mask.
     """
     h, w = img_size
-    bg = float(background_value)
+    bg = float(background_mask_value)
 
     eye_top = int(0.2 * h)
     eye_bottom = int(0.53 * h)

@@ -21,7 +21,6 @@ import tensorflow as tf
 from pathlib import Path
 from statistics import median
 import matplotlib.pyplot as plt
-import argparse
 from typing import Dict, List, Optional, Set
 
 # Add root path
@@ -29,20 +28,25 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from src.gradcam import CustomGradCAM
-from src.analysis_pipeline import get_analysis_pipeline_from_data_dir
+from src.ds_with_paths_pipeline import get_dataset_with_paths
 from src.focus_metrics import compute_focus_ratio
-from src.mask_helpers import create_landmark_mask, create_static_mask
+from src.mask_helpers import (
+    create_landmark_mask,
+    create_static_mask,
+    image_to_float01_rgb,
+    image_to_uint8_rgb,
+)
 
 
 def default_gradcam_cfg() -> dict:
     """Default hyperparameters and paths for GradCAM weight optimization (no globals)."""
     return {
-        "model_path": r"runs/30_epoch_baseline/models/final_model.h5",
+        "model_path": r"runs/baseline/models/final_model.h5",
         "data_dir": r"splitted_dataset/train",
         "img_size": (224, 224),
         "landmark_box_half_size": 12,
         "fallback_to_static": True,
-        "background_mask_value": 0.2,
+        "background_mask_value": 0.0,
         "class_names": ["NotDrowsy", "Drowsy"],
         "weight_mode": "reward",
         "alpha_max": 3.0,
@@ -83,33 +87,33 @@ def plot_weights(weights: dict, *, save_path: str) -> None:
 def _parse_img_size(raw: str):
     parts = [int(x.strip()) for x in str(raw).split(",") if x.strip()]
     if len(parts) != 2:
-        raise SystemExit("--img-size must be like 224,224")
+        raise SystemExit("--img_size must be like 224,224")
     return (parts[0], parts[1])
 
 
 def _parse_class_names(raw: str):
     parts = [x.strip() for x in str(raw).split(",") if x.strip()]
     if len(parts) != 2:
-        raise SystemExit("--class-names must be two comma-separated names, e.g. NotDrowsy,Drowsy")
+        raise SystemExit("--class_names must be two comma-separated names, e.g. NotDrowsy,Drowsy")
     return [parts[0], parts[1]]
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     d = default_gradcam_cfg()
     parser = argparse.ArgumentParser(description="Auto-optimize GradCAM sample weights.")
-    parser.add_argument("--model-path", type=str, default=d["model_path"])
-    parser.add_argument("--data-dir", type=str, default=d["data_dir"])
-    parser.add_argument("--artifacts-dir", type=str, default="artifacts")
-    parser.add_argument("--img-size", type=str, default=f"{d['img_size'][0]},{d['img_size'][1]}")
-    parser.add_argument("--class-names", type=str, default="NotDrowsy,Drowsy")
-    parser.add_argument("--weight-mode", type=str, choices=["reward", "penalize"], default=d["weight_mode"])
-    parser.add_argument("--roi-padding-px", type=int, default=d["landmark_box_half_size"])
-    parser.add_argument("--background-mask-value", type=float, default=d["background_mask_value"])
-    parser.add_argument("--fallback-to-static", type=int, choices=[0, 1], default=int(d["fallback_to_static"]))
+    parser.add_argument("--model_path", type=str, default=d["model_path"])
+    parser.add_argument("--data_dir", type=str, default=d["data_dir"])
+    parser.add_argument("--artifacts_dir", type=str, default="artifacts")
+    parser.add_argument("--img_size", type=str, default=f"{d['img_size'][0]},{d['img_size'][1]}")
+    parser.add_argument("--class_names", type=str, default="NotDrowsy,Drowsy")
+    parser.add_argument("--weight_mode", type=str, choices=["reward", "penalize"], default=d["weight_mode"])
+    parser.add_argument("--landmark_box_half_size", type=int, default=d["landmark_box_half_size"])
+    parser.add_argument("--background_mask_value", type=float, default=d["background_mask_value"])
+    parser.add_argument("--fallback_to_static", type=int, choices=[0, 1], default=int(d["fallback_to_static"]))
     return parser
 
 # ================== CORE ======================
-def collect_focus_distribution(
+def collect_true_class_focus_ratios_for_weighting(
     model,
     data_dir,
     img_size,
@@ -124,7 +128,7 @@ def collect_focus_distribution(
     """
     gradcam = CustomGradCAM(model)
 
-    ds, file_paths = get_analysis_pipeline_from_data_dir(
+    ds, file_paths = get_dataset_with_paths(
         data_dir=data_dir,
         img_size=img_size,
         class_names=cfg.get("class_names", ["NotDrowsy", "Drowsy"]),
@@ -139,6 +143,7 @@ def collect_focus_distribution(
     print("[AutoOpt] Computing focus distribution...")
     print("[AutoOpt] Using landmark mask with optional static fallback")
     print(f"[AutoOpt] Landmark box half-size: {cfg['landmark_box_half_size']}")
+    print(f"[AutoOpt] Landmark background mask value: {cfg['background_mask_value']}")
     print(f"[AutoOpt] Fallback to static: {cfg['fallback_to_static']}")
 
     for idx, (data_batch, path_batch) in enumerate(ds):
@@ -152,11 +157,10 @@ def collect_focus_distribution(
         image = images[0].numpy()
         label = int(labels[0].numpy())
         
-        # Convert to uint8 for MediaPipe (0-255 range)
-        image_uint8 = (image * 255.0).astype(np.uint8) if image.max() <= 1.0 else image.astype(np.uint8)
-        image_normalized = image_uint8 / 255.0 if image.max() > 1.0 else image
+        image_rgb_uint8 = image_to_uint8_rgb(image)
+        image_float01 = image_to_float01_rgb(image)
 
-        heatmap = gradcam.compute_heatmap(image_normalized, class_idx=label)
+        heatmap = gradcam.compute_heatmap(image_float01, class_idx=label)
         
         # IMPROVEMENT: Better resize with bilinear interpolation
         # Resize heatmap to match image size with better quality
@@ -168,16 +172,16 @@ def collect_focus_distribution(
         ).numpy()[..., 0]
 
         mask = create_landmark_mask(
-            image_uint8,
+            image_rgb_uint8,
             img_size,
-            background_value=float(cfg.get("background_mask_value", 0.2)),
+            background_mask_value=float(cfg.get("background_mask_value", 0.0)),
             landmark_box_half_size=int(cfg.get("landmark_box_half_size", 12)),
         )
         if mask is None:
             if cfg['fallback_to_static']:
                 mask = create_static_mask(
                     img_size,
-                    background_value=float(cfg.get("background_mask_value", 0.2)),
+                    background_mask_value=float(cfg.get("background_mask_value", 0.0)),
                 )
                 static_fallback_count += 1
             else:
@@ -207,7 +211,7 @@ def choose_params(ratios, cfg):
     IMPROVEMENT: Dynamic parameter optimization based on data distribution.
     
     Optimizes:
-    - target_focus (based on focus distribution with std consideration)
+    - focus_reference (based on focus distribution with std consideration)
     - alpha (based on virtual penalty sim with more candidates)
     - clip range (scaled from alpha with better bounds)
     """
@@ -221,7 +225,7 @@ def choose_params(ratios, cfg):
     print(f"[AutoOpt] Focus Ratio Stats: mean={mean_r:.3f}, median={med:.3f}, "
           f"std={std_r:.3f}, Q25={q25:.3f}, Q75={q75:.3f}")
 
-    # --------- IMPROVEMENT: Dynamic Target Focus ---------
+    # --------- IMPROVEMENT: Dynamic Reference Focus ---------
     # Use median + adaptive offset based on std
     # If std is high, use smaller offset (more conservative)
     # If std is low, use larger offset (more aggressive)
@@ -229,6 +233,9 @@ def choose_params(ratios, cfg):
     target_focus = min(0.92, max(0.45, med + adaptive_offset))
     
     print(f"[AutoOpt] Adaptive offset: {adaptive_offset:.3f}, Target focus: {target_focus:.3f}")
+    
+    focus_reference = np.percentile(ratios, 60)
+    print(f"[AutoOpt] Focus reference: {focus_reference:.3f}")
 
     # --------- IMPROVEMENT: Weight Distribution Based Alpha Optimization ---------
     # Evaluate alpha based on actual weight distribution, not just penalty
@@ -237,7 +244,7 @@ def choose_params(ratios, cfg):
     candidates = np.linspace(alpha_min, alpha_max, 20).tolist()  # More granular search
     candidates = [round(c, 2) for c in candidates]  # Round to 2 decimals
 
-    def evaluate_alpha(alpha, ratios, target, cfg):
+    def evaluate_alpha(alpha, ratios, Reference, cfg):
         """
         Evaluate alpha based on weight distribution quality.
         
@@ -257,7 +264,7 @@ def choose_params(ratios, cfg):
         clip_max = min(weight_max, 1.0 + clip_range_factor)
         
         # 2) Calculate weights
-        deltas = ratios - target
+        deltas = ratios - Reference
         weights = 1.0 + alpha * deltas
         weights = np.clip(weights, clip_min, clip_max)
         
@@ -291,7 +298,7 @@ def choose_params(ratios, cfg):
     alpha_scores = {}
     alpha_stats = {}
     for a in candidates:
-        score, stats = evaluate_alpha(a, ratios, target_focus, cfg)
+        score, stats = evaluate_alpha(a, ratios, focus_reference, cfg)
         alpha_scores[a] = score
         alpha_stats[a] = stats
     
@@ -320,7 +327,7 @@ def choose_params(ratios, cfg):
     print(f"[AutoOpt] Final clip range: [{clip_min:.3f}, {clip_max:.3f}]")
 
     return dict(
-        target_focus=float(target_focus),
+        focus_reference=float(focus_reference),
         alpha=float(best_alpha),
         clip_min=float(clip_min),
         clip_max=float(clip_max),
@@ -359,16 +366,16 @@ def apply_weights(
     for r, fp in zip(ratios, file_paths):
         if mode == "reward":
             # Reward approach: High focus ratio → High weight
-            # delta = r - target_focus
-            # If r > target_focus → delta > 0 → w > 1 (reward)
-            # If r < target_focus → delta < 0 → w < 1 (penalize)
-            delta = r - params["target_focus"]
+            # delta = r - focus_reference
+            # If r > focus_reference → delta > 0 → w > 1 (reward)
+            # If r < focus_reference → delta < 0 → w < 1 (penalize)
+            delta = r - params["focus_reference"]
         else:  # "penalize"
             # Penalize approach: Low focus ratio → High weight
-            # delta = target_focus - r
-            # If r < target_focus → delta > 0 → w > 1 (penalize)
-            # If r > target_focus → delta < 0 → w < 1 (reward)
-            delta = params["target_focus"] - r
+            # delta = focus_reference - r
+            # If r < focus_reference → delta > 0 → w > 1 (penalize)
+            # If r > focus_reference → delta < 0 → w < 1 (reward)
+            delta = params["focus_reference"] - r
         
         w = 1 + params["alpha"] * delta
         w = float(np.clip(w, params["clip_min"], params["clip_max"]))
@@ -413,7 +420,7 @@ def compute_fold_weights(
     (e.g. ``Drowsy/A0001.png``), aligned with ``apply_weights`` / training lookup.
 
     ``train_files`` may be absolute paths as stored in fold JSON; they are normalized against
-    ``dataset_dir`` for filtering inside ``collect_focus_distribution``.
+    ``dataset_dir`` for filtering inside ``collect_true_class_focus_ratios_for_weighting``.
     """
     run_cfg = {**default_gradcam_cfg(), **(cfg or {})}
     run_cfg["data_dir"] = os.path.abspath(dataset_dir)
@@ -423,7 +430,7 @@ def compute_fold_weights(
         for fp in train_files
     }
     model = tf.keras.models.load_model(model_path, compile=False)
-    ratios, file_paths = collect_focus_distribution(
+    ratios, file_paths = collect_true_class_focus_ratios_for_weighting(
         model, run_cfg["data_dir"], run_cfg["img_size"], run_cfg, include_rel_paths
     )
     if len(ratios) == 0:
@@ -455,8 +462,8 @@ def plot_weight_histogram(weight_values, ratios, params, output_path):
     
     # 2. Focus ratio distribution
     axes[0, 1].hist(ratios, bins=50, edgecolor='black', alpha=0.7, color='orange')
-    axes[0, 1].axvline(params["target_focus"], color='r', linestyle='--', 
-                       label=f'Target: {params["target_focus"]:.3f}')
+    axes[0, 1].axvline(params["focus_reference"], color='r', linestyle='--', 
+                       label=f'Reference: {params["focus_reference"]:.3f}')
     axes[0, 1].axvline(np.median(ratios), color='g', linestyle='--', 
                        label=f'Median: {np.median(ratios):.3f}')
     axes[0, 1].set_xlabel('Focus Ratio')
@@ -467,8 +474,8 @@ def plot_weight_histogram(weight_values, ratios, params, output_path):
     
     # 3. Weight vs Focus Ratio scatter
     axes[1, 0].scatter(ratios, weight_values, alpha=0.3, s=10)
-    axes[1, 0].axvline(params["target_focus"], color='r', linestyle='--', 
-                       label=f'Target: {params["target_focus"]:.3f}')
+    axes[1, 0].axvline(params["focus_reference"], color='r', linestyle='--', 
+                       label=f'Reference: {params["focus_reference"]:.3f}')
     axes[1, 0].set_xlabel('Focus Ratio')
     axes[1, 0].set_ylabel('Weight')
     axes[1, 0].set_title('Weight vs Focus Ratio')
@@ -490,7 +497,7 @@ Focus Ratio Statistics:
   Mean: {np.mean(ratios):.3f}
   Median: {np.median(ratios):.3f}
   Std: {np.std(ratios):.3f}
-  Target: {params["target_focus"]:.3f}
+  Reference: {params["focus_reference"]:.3f}
 
 Parameters:
   Alpha: {params["alpha"]:.3f}
@@ -515,7 +522,7 @@ if __name__ == "__main__":
     cfg["img_size"] = _parse_img_size(args.img_size)
     cfg["class_names"] = _parse_class_names(args.class_names)
     cfg["weight_mode"] = str(args.weight_mode)
-    cfg["landmark_box_half_size"] = int(args.roi_padding_px)
+    cfg["landmark_box_half_size"] = int(args.landmark_box_half_size)
     cfg["background_mask_value"] = float(args.background_mask_value)
     cfg["fallback_to_static"] = bool(int(args.fallback_to_static))
     artifacts_dir = args.artifacts_dir
@@ -523,7 +530,7 @@ if __name__ == "__main__":
 
     model = tf.keras.models.load_model(cfg["model_path"], compile=False)
 
-    ratios, file_paths = collect_focus_distribution(
+    ratios, file_paths = collect_true_class_focus_ratios_for_weighting(
         model, cfg["data_dir"], cfg["img_size"], cfg, include_rel_paths=None
     )
     if len(ratios) == 0:
@@ -574,7 +581,7 @@ if __name__ == "__main__":
         f.write(f"  Q25: {params.get('q25_focus', np.percentile(ratios, 25)):.3f}\n")
         f.write(f"  Q75: {params.get('q75_focus', np.percentile(ratios, 75)):.3f}\n\n")
         f.write("Optimized Parameters:\n")
-        f.write(f"  Target Focus: {params['target_focus']:.3f}\n")
+        f.write(f"  Reference Focus: {params['focus_reference']:.3f}\n")
         f.write(f"  Alpha: {params['alpha']:.3f}\n")
         f.write(f"  Clip Range: [{params['clip_min']:.3f}, {params['clip_max']:.3f}]\n\n")
         f.write("Weight Statistics:\n")
