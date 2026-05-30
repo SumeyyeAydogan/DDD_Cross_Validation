@@ -20,7 +20,7 @@ from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.focus_metrics import compute_focus_ratio
+from src.focus_metrics import compute_focus_score
 from src.gradcam import CustomGradCAM
 from src.fold_functions import load_fold_manifest
 from src.cv_dataloader import labels_from_paths
@@ -56,6 +56,10 @@ CONFIG = {
         "log": "log",
         "exp": "exp",
     },
+    "baseline_label": "baseline",
+    "focus_metric": "focus_ratio",
+    "roi_threshold": 0.5,
+    "eps": 1e-8,
 }
 
 
@@ -72,13 +76,14 @@ def _resolve_fold_paths(fold_id: int) -> Tuple[List[str], Dict[str, str]]:
     val_paths = list(data["val"]["files"])
 
     runs_map: Dict[str, str] = CONFIG.get("model_runs") or {}
-    need = ("baseline", "reward", "log", "exp")
-    for k in need:
-        if k not in runs_map:
-            raise KeyError(f"CONFIG['model_runs'] must contain '{k}'")
+    baseline_label = str(CONFIG.get("baseline_label", "baseline"))
+    if baseline_label not in runs_map:
+        raise KeyError(f"CONFIG['model_runs'] must contain baseline label '{baseline_label}'")
+    if len(runs_map) < 2:
+        raise KeyError("CONFIG['model_runs'] must include baseline + at least one compare label.")
 
     model_paths: Dict[str, str] = {}
-    for tag in need:
+    for tag in runs_map.keys():
         run_name = str(runs_map[tag])
         h5 = project_root / "runs" / run_name / f"fold_{fold_id}" / "models" / f"fold_{fold_id}.h5"
         model_paths[tag] = str(h5)
@@ -110,7 +115,16 @@ def _compute_focus_ratio_for_model(
         method="bilinear",
         antialias=True,
     ).numpy()[..., 0]
-    return float(compute_focus_ratio(heatmap, mask)), int(pred)
+    heatmap = np.clip(heatmap, 0.0, None).astype(np.float32)
+    metric = str(CONFIG.get("focus_metric", "focus_ratio"))
+    score, _ = compute_focus_score(
+        heatmap,
+        mask,
+        metric=metric,
+        roi_threshold=float(CONFIG.get("roi_threshold", 0.5)),
+        eps=float(CONFIG.get("eps", 1e-8)),
+    )
+    return float(score), int(pred)
 
 
 def _safe_float(v: Optional[float]) -> str:
@@ -119,26 +133,19 @@ def _safe_float(v: Optional[float]) -> str:
     return f"{float(v):.8f}"
 
 
-def _write_details_csv(rows: List[Dict[str, object]], output_csv: Path) -> None:
+def _write_details_csv(rows: List[Dict[str, object]], output_csv: Path, baseline_label: str, compare_labels: List[str]) -> None:
     output_csv.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = ["fold_id", "image_path", "face_ok", baseline_label]
+    fieldnames.extend(compare_labels)
+    fieldnames.extend([f"delta_{comp}" for comp in compare_labels])
+    fieldnames.extend([f"group_{comp}" for comp in compare_labels])
+    fieldnames.extend([f"acc_group_{comp}" for comp in compare_labels])
+    fieldnames.extend([f"{baseline_label}_pred"])
+    fieldnames.extend([f"{comp}_pred" for comp in compare_labels])
     with open(output_csv, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
             f,
-            fieldnames=[
-                "fold_id",
-                "image_path",
-                "face_ok",
-                "baseline",
-                "reward",
-                "log",
-                "exp",
-                "delta_reward",
-                "delta_log",
-                "delta_exp",
-                "group_reward",
-                "group_log",
-                "group_exp",
-            ],
+            fieldnames=fieldnames,
         )
         writer.writeheader()
         for r in rows:
@@ -152,7 +159,8 @@ def _write_comparison_csv(
     comp: str,
 ) -> Dict[str, object]:
     fold_dir.mkdir(parents=True, exist_ok=True)
-    output_csv = fold_dir / f"baseline_vs_{comp}.csv"
+    baseline_label = str(CONFIG.get("baseline_label", "baseline"))
+    output_csv = fold_dir / f"{baseline_label}_vs_{comp}.csv"
     with open(output_csv, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
             f,
@@ -182,7 +190,7 @@ def _write_comparison_csv(
 
     deltas = [float(r[f"delta_{comp}"]) for r in detail_rows if r[f"delta_{comp}"] not in ("", None)]
     summary = {
-        "comparison": f"baseline_vs_{comp}",
+        "comparison": f"{baseline_label}_vs_{comp}",
         "n_total": int(len(detail_rows)),
         "n_face_ok": int(sum(int(r["face_ok"]) for r in detail_rows)),
         "increased": int(sum(1 for d in deltas if d > 0)),
@@ -191,7 +199,7 @@ def _write_comparison_csv(
         "mean_delta": float(np.mean(deltas)) if deltas else float("nan"),
         "csv_path": str(output_csv),
     }
-    with open(fold_dir / f"baseline_vs_{comp}_summary.json", "w", encoding="utf-8") as f:
+    with open(fold_dir / f"{baseline_label}_vs_{comp}_summary.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
     return summary
 
@@ -422,13 +430,14 @@ def _save_group_gradcam_examples(
     detail_rows: List[Dict[str, object]],
     fold_dir: Path,
     comp: str,
+    baseline_label: str,
     models: Dict[str, tf.keras.Model],
     cams: Dict[str, CustomGradCAM],
     img_size: Tuple[int, int],
 ) -> Dict[str, object]:
-    base_dir = fold_dir / "gradcam_samples" / f"baseline_vs_{comp}"
+    base_dir = fold_dir / "gradcam_samples" / f"{baseline_label}_vs_{comp}"
     max_count = int(CONFIG.get("gradcam_samples_per_group", 20))
-    result: Dict[str, object] = {"comparison": f"baseline_vs_{comp}", "groups": {}}
+    result: Dict[str, object] = {"comparison": f"{baseline_label}_vs_{comp}", "groups": {}}
 
     for group_name in ("increased", "decreased"):
         for acc_group_name in ("acc_improved", "acc_worsened", "acc_same"):
@@ -476,9 +485,9 @@ def _save_group_gradcam_examples(
                     image_path = str(row["image_path"])
                     stem = Path(image_path).stem
                     prefix = f"{i:03d}_{stem}"
-                    baseline_png = group_dir / f"{prefix}_baseline.png"
+                    baseline_png = group_dir / f"{prefix}_{baseline_label}.png"
                     compare_png = group_dir / f"{prefix}_{comp}.png"
-                    baseline_labeled_png = group_dir / f"{prefix}_baseline_labeled.png"
+                    baseline_labeled_png = group_dir / f"{prefix}_{baseline_label}_labeled.png"
                     compare_labeled_png = group_dir / f"{prefix}_{comp}_labeled.png"
                     combined_png = group_dir / f"{prefix}_combined_vertical.png"
                     combined_svg = svg_dir / f"{prefix}_combined_vertical.svg"
@@ -495,15 +504,15 @@ def _save_group_gradcam_examples(
                         writer.writerow(
                             {
                                 "fold_id": row["fold_id"],
-                                "comparison": f"baseline_vs_{comp}",
+                                "comparison": f"{baseline_label}_vs_{comp}",
                                 "overlap_group": group_name,
                                 "acc_group": acc_group_name,
                                 "image_path": image_path,
                                 "true_label": row["true_label"],
-                                "baseline_pred": row["baseline_pred"],
+                                "baseline_pred": row[f"{baseline_label}_pred"],
                                 f"{comp}_pred": row[f"{comp}_pred"],
                                 "delta": row[f"delta_{comp}"],
-                                "baseline_focus_ratio": row["baseline"],
+                                "baseline_focus_ratio": row[baseline_label],
                                 f"{comp}_focus_ratio": row[comp],
                                 "baseline_gradcam_path": str(baseline_png),
                                 "compare_gradcam_path": str(compare_png),
@@ -521,7 +530,7 @@ def _save_group_gradcam_examples(
                     image_norm = image_uint8.astype(np.float32) / 255.0
 
                     tmp_baseline = _render_gradcam_temp_png(
-                        cam=cams["baseline"],
+                        cam=cams[baseline_label],
                         image_norm=image_norm,
                         true_label=int(row["true_label"]),
                     )
@@ -533,7 +542,7 @@ def _save_group_gradcam_examples(
                     tmp_baseline_labeled = tmp_baseline.with_name(tmp_baseline.stem + "_labeled.png")
                     tmp_compare_labeled = tmp_compare.with_name(tmp_compare.stem + "_labeled.png")
                     try:
-                        _add_top_label(tmp_baseline, tmp_baseline_labeled, "BASELINE")
+                        _add_top_label(tmp_baseline, tmp_baseline_labeled, baseline_label.upper())
                         _add_top_label(tmp_compare, tmp_compare_labeled, comp.upper())
                         _combine_vertical_images([tmp_baseline_labeled, tmp_compare_labeled], combined_png)
                         if bool(CONFIG.get("save_combined_svg", True)):
@@ -554,15 +563,15 @@ def _save_group_gradcam_examples(
                     writer.writerow(
                         {
                             "fold_id": row["fold_id"],
-                            "comparison": f"baseline_vs_{comp}",
+                            "comparison": f"{baseline_label}_vs_{comp}",
                             "overlap_group": group_name,
                             "acc_group": acc_group_name,
                             "image_path": image_path,
                             "true_label": row["true_label"],
-                            "baseline_pred": row["baseline_pred"],
+                            "baseline_pred": row[f"{baseline_label}_pred"],
                             f"{comp}_pred": row[f"{comp}_pred"],
                             "delta": row[f"delta_{comp}"],
-                            "baseline_focus_ratio": row["baseline"],
+                            "baseline_focus_ratio": row[baseline_label],
                             f"{comp}_focus_ratio": row[comp],
                             "baseline_gradcam_path": str(baseline_png) if bool(CONFIG.get("save_intermediate_gradcam_images", False)) else "",
                             "compare_gradcam_path": str(compare_png) if bool(CONFIG.get("save_intermediate_gradcam_images", False)) else "",
@@ -585,6 +594,7 @@ def _save_group_gradcam_examples(
 def _build_fold_summary(
     fold_id: int,
     detail_rows: List[Dict[str, object]],
+    compare_labels: List[str],
 ) -> Dict[str, object]:
     summary: Dict[str, object] = {
         "fold_id": int(fold_id),
@@ -592,7 +602,7 @@ def _build_fold_summary(
         "n_face_ok": int(sum(int(r["face_ok"]) for r in detail_rows)),
     }
 
-    for comp in ("reward", "log", "exp"):
+    for comp in compare_labels:
         deltas = [float(r[f"delta_{comp}"]) for r in detail_rows if r[f"delta_{comp}"] not in ("", None)]
         summary[f"{comp}_increased"] = int(sum(1 for d in deltas if d > 0))
         summary[f"{comp}_decreased"] = int(sum(1 for d in deltas if d < 0))
@@ -614,12 +624,15 @@ def _build_fold_summary(
     return summary
 
 
-def _plot_overlap_accuracy_effect_map(all_fold_summaries: List[Dict[str, object]], output_path: Path) -> None:
-    colors = {"reward": "#2E7D32", "log": "#F57C00", "exp": "#D32F2F"}
+def _plot_overlap_accuracy_effect_map(
+    all_fold_summaries: List[Dict[str, object]], output_path: Path, compare_labels: List[str]
+) -> None:
+    palette = ["#2E7D32", "#F57C00", "#D32F2F", "#1565C0", "#6A1B9A", "#00897B"]
+    colors = {label: palette[i % len(palette)] for i, label in enumerate(compare_labels)}
     plt.figure(figsize=(8, 6))
     ax = plt.gca()
 
-    for comp in ("reward", "log", "exp"):
+    for comp in compare_labels:
         xs, ys = [], []
         for row in all_fold_summaries:
             n_face = max(1, int(row.get("n_face_ok", 0)))
@@ -648,15 +661,18 @@ def _plot_overlap_accuracy_effect_map(all_fold_summaries: List[Dict[str, object]
     plt.close()
 
 
-def _plot_overlap_acc_group_stacked(all_fold_summaries: List[Dict[str, object]], output_path: Path) -> None:
-    comps = ("reward", "log", "exp")
+def _plot_overlap_acc_group_stacked(
+    all_fold_summaries: List[Dict[str, object]], output_path: Path, compare_labels: List[str]
+) -> None:
+    comps = list(compare_labels)
     overlap_groups = ("increased", "decreased")
     acc_groups = ("acc_improved", "acc_worsened", "acc_same")
     acc_colors = {"acc_improved": "#2E7D32", "acc_worsened": "#C62828", "acc_same": "#9E9E9E"}
 
-    fig, axes = plt.subplots(1, 3, figsize=(13, 4), sharey=True)
+    fig, axes = plt.subplots(1, len(comps), figsize=(4.3 * max(1, len(comps)), 4), sharey=True)
+    axes_arr = np.array(axes).reshape(-1)
     for i, comp in enumerate(comps):
-        ax = axes[i]
+        ax = axes_arr[i]
         x = np.arange(len(overlap_groups))
         bottoms = np.zeros(len(overlap_groups), dtype=np.float32)
 
@@ -686,9 +702,9 @@ def _plot_overlap_acc_group_stacked(all_fold_summaries: List[Dict[str, object]],
         ax.set_title(comp)
         ax.grid(axis="y", alpha=0.2)
         ax.set_ylim(0.0, 1.0)
-    axes[0].set_ylabel("Fold-mean ratio")
+    axes_arr[0].set_ylabel("Fold-mean ratio")
     fig.suptitle("Accuracy Outcome Composition within Overlap Groups", y=1.02)
-    handles, labels = axes[0].get_legend_handles_labels()
+    handles, labels = axes_arr[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper center", ncol=3, frameon=False)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     plt.tight_layout()
@@ -720,6 +736,8 @@ def run_fold_overlap_analysis(
         models[label] = model
         cams[label] = CustomGradCAM(model)
 
+    baseline_label = str(CONFIG.get("baseline_label", "baseline"))
+    compare_labels = [k for k in model_paths.keys() if k != baseline_label]
     detail_rows: List[Dict[str, object]] = []
     skipped_bad_images = 0
     for idx, image_path in enumerate(file_paths):
@@ -752,38 +770,22 @@ def run_fold_overlap_analysis(
                 ratios[label] = ratio
                 preds[label] = pred
 
-        d_reward = None if ratios["baseline"] is None or ratios["reward"] is None else ratios["reward"] - ratios["baseline"]
-        d_log = None if ratios["baseline"] is None or ratios["log"] is None else ratios["log"] - ratios["baseline"]
-        d_exp = None if ratios["baseline"] is None or ratios["exp"] is None else ratios["exp"] - ratios["baseline"]
-        acc_group_reward = _compare_accuracy_group(preds["baseline"], preds["reward"], true_label)
-        acc_group_log = _compare_accuracy_group(preds["baseline"], preds["log"], true_label)
-        acc_group_exp = _compare_accuracy_group(preds["baseline"], preds["exp"], true_label)
-
-        detail_rows.append(
-            {
-                "fold_id": int(fold_id),
-                "image_path": image_path,
-                "true_label": true_label,
-                "face_ok": face_ok,
-                "baseline": _safe_float(ratios["baseline"]),
-                "reward": _safe_float(ratios["reward"]),
-                "log": _safe_float(ratios["log"]),
-                "exp": _safe_float(ratios["exp"]),
-                "baseline_pred": preds["baseline"],
-                "reward_pred": preds["reward"],
-                "log_pred": preds["log"],
-                "exp_pred": preds["exp"],
-                "delta_reward": _safe_float(d_reward),
-                "delta_log": _safe_float(d_log),
-                "delta_exp": _safe_float(d_exp),
-                "group_reward": _compare_delta(d_reward),
-                "group_log": _compare_delta(d_log),
-                "group_exp": _compare_delta(d_exp),
-                "acc_group_reward": acc_group_reward,
-                "acc_group_log": acc_group_log,
-                "acc_group_exp": acc_group_exp,
-            }
-        )
+        row: Dict[str, object] = {
+            "fold_id": int(fold_id),
+            "image_path": image_path,
+            "true_label": true_label,
+            "face_ok": face_ok,
+            baseline_label: _safe_float(ratios[baseline_label]),
+            f"{baseline_label}_pred": preds[baseline_label],
+        }
+        for comp in compare_labels:
+            delta = None if ratios[baseline_label] is None or ratios[comp] is None else ratios[comp] - ratios[baseline_label]
+            row[comp] = _safe_float(ratios[comp])
+            row[f"{comp}_pred"] = preds[comp]
+            row[f"delta_{comp}"] = _safe_float(delta)
+            row[f"group_{comp}"] = _compare_delta(delta)
+            row[f"acc_group_{comp}"] = _compare_accuracy_group(preds[baseline_label], preds[comp], true_label)
+        detail_rows.append(row)
 
         if (idx + 1) % 50 == 0:
             print(f"  Processed {idx+1}/{len(file_paths)}")
@@ -792,7 +794,7 @@ def run_fold_overlap_analysis(
 
     fold_dir = output_dir / f"fold_{fold_id}"
     comparison_summaries = []
-    for comp in ("reward", "log", "exp"):
+    for comp in compare_labels:
         comparison_summaries.append(
             _write_comparison_csv(
                 detail_rows=detail_rows,
@@ -803,12 +805,13 @@ def run_fold_overlap_analysis(
 
     gradcam_sample_summaries = []
     if bool(CONFIG.get("save_gradcam_samples", True)):
-        for comp in ("reward", "log", "exp"):
+        for comp in compare_labels:
             gradcam_sample_summaries.append(
                 _save_group_gradcam_examples(
                     detail_rows=detail_rows,
                     fold_dir=fold_dir,
                     comp=comp,
+                    baseline_label=baseline_label,
                     models=models,
                     cams=cams,
                     img_size=img_size,
@@ -817,9 +820,12 @@ def run_fold_overlap_analysis(
 
     detail_csv = fold_dir / "overlap_details.csv"
     if bool(CONFIG.get("save_fold_detail_csv", False)):
-        _write_details_csv(detail_rows, detail_csv)
+        _write_details_csv(detail_rows, detail_csv, baseline_label=baseline_label, compare_labels=compare_labels)
 
-    fold_summary = _build_fold_summary(fold_id, detail_rows)
+    fold_summary = _build_fold_summary(fold_id, detail_rows, compare_labels=compare_labels)
+    fold_summary["baseline_label"] = baseline_label
+    fold_summary["focus_metric"] = str(CONFIG.get("focus_metric", "focus_ratio"))
+    fold_summary["compare_labels"] = compare_labels
     fold_summary["comparisons"] = comparison_summaries
     fold_summary["gradcam_samples"] = gradcam_sample_summaries
     with open(fold_dir / "summary.json", "w", encoding="utf-8") as f:
@@ -827,7 +833,7 @@ def run_fold_overlap_analysis(
 
     if bool(CONFIG.get("save_fold_detail_csv", False)):
         print(f"Saved detail csv: {detail_csv}")
-    print(f"Saved comparison csv files: baseline_vs_reward/log/exp.csv")
+    print(f"Saved comparison csv files: {baseline_label}_vs_<compare>.csv")
     if bool(CONFIG.get("save_gradcam_samples", True)):
         print("Saved GradCAM sample groups under: gradcam_samples/")
     print(f"Saved summary json: {fold_dir / 'summary.json'}")
@@ -842,6 +848,8 @@ def main() -> None:
     out_tag = (CONFIG.get("output_tag") or "").strip() or "overlap"
     output_dir = project_root / "artifacts" / "overlap_accuracy_comparison" / out_tag
     output_dir.mkdir(parents=True, exist_ok=True)
+    baseline_label = str(CONFIG.get("baseline_label", "baseline"))
+    compare_labels = [k for k in (CONFIG.get("model_runs") or {}).keys() if k != baseline_label]
 
     all_fold_summaries: List[Dict[str, object]] = []
     for fold_id in fold_ids:
@@ -870,35 +878,23 @@ def main() -> None:
         return
 
     aggregate_csv = output_dir / "fold_summaries.csv"
+    fieldnames = ["fold_id", "n_total", "n_face_ok", "baseline_label", "compare_labels"]
+    for comp in compare_labels:
+        fieldnames.extend(
+            [
+                f"{comp}_increased",
+                f"{comp}_decreased",
+                f"{comp}_equal",
+                f"{comp}_mean_delta",
+                f"{comp}_acc_improved",
+                f"{comp}_acc_worsened",
+                f"{comp}_acc_same",
+            ]
+        )
     with open(aggregate_csv, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
             f,
-            fieldnames=[
-                "fold_id",
-                "n_total",
-                "n_face_ok",
-                "reward_increased",
-                "reward_decreased",
-                "reward_equal",
-                "reward_mean_delta",
-                "reward_acc_improved",
-                "reward_acc_worsened",
-                "reward_acc_same",
-                "log_increased",
-                "log_decreased",
-                "log_equal",
-                "log_mean_delta",
-                "log_acc_improved",
-                "log_acc_worsened",
-                "log_acc_same",
-                "exp_increased",
-                "exp_decreased",
-                "exp_equal",
-                "exp_mean_delta",
-                "exp_acc_improved",
-                "exp_acc_worsened",
-                "exp_acc_same",
-            ],
+            fieldnames=fieldnames,
             extrasaction="ignore",
         )
         writer.writeheader()
@@ -912,14 +908,30 @@ def main() -> None:
     _plot_overlap_accuracy_effect_map(
         all_fold_summaries=all_fold_summaries,
         output_path=plots_dir / "overlap_accuracy_effect_map.png",
+        compare_labels=compare_labels,
     )
     _plot_overlap_acc_group_stacked(
         all_fold_summaries=all_fold_summaries,
         output_path=plots_dir / "overlap_acc_group_stacked.png",
+        compare_labels=compare_labels,
     )
+
+    run_info = {
+        "output_tag": out_tag,
+        "output_dir": str(output_dir),
+        "baseline_label": baseline_label,
+        "model_runs": dict(CONFIG.get("model_runs") or {}),
+        "focus_metric": str(CONFIG.get("focus_metric", "focus_ratio")),
+        "fold_start": fold_start,
+        "fold_count": fold_count,
+        "background_mask_value": float(CONFIG.get("background_mask_value", 0.0)),
+    }
+    run_info_path = output_dir / "run_info.json"
+    run_info_path.write_text(json.dumps(run_info, indent=2, ensure_ascii=False), encoding="utf-8")
 
     print("\nCompleted overlap comparison.")
     print(f"Output folder: {output_dir}")
+    print(f"Run info: {run_info_path}")
     print(f"Summary csv: {aggregate_csv}")
     print(f"Plots: {plots_dir}")
 

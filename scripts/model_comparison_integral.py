@@ -1,4 +1,5 @@
 import os, sys, json, csv, gc
+import math
 import numpy as np
 import tensorflow as tf
 from pathlib import Path
@@ -16,7 +17,11 @@ from src.ds_with_paths_pipeline import get_dataset_with_paths
 from src.fold_functions import load_fold_manifest
 from src.cv_dataloader import make_tf_dataset_from_paths
 from src.mask_helpers import create_landmark_mask, image_to_float01_rgb, image_to_uint8_rgb, ROI_IDX
-from src.focus_metrics import compute_focus_ratio, histogram_right_tail_area
+from src.focus_metrics import (
+    FOCUS_METRIC_LABELS,
+    compute_focus_score,
+    histogram_right_tail_area,
+)
 
 # (plot label, run directory name under project_root/runs/) — cv_main layout:
 #   runs/<name>/fold_k/models/fold_k.h5
@@ -68,17 +73,27 @@ CONFIG: Dict[str, Any] = {
 
     #Gradcam Source
 
-    "gradcam_class_source": "model_prediction"
+    "gradcam_class_source": "model_prediction",
+
+    # focus_ratio | density_gap | density_gap_shifted | inside_density
+    "focus_metric": "focus_ratio",
+    "roi_threshold": 0.5,
+    "eps": 1e-8,
 }
 
 MODEL_CONFIGS = _default_model_configs()
 
 # ================== CORE ======================
-def _collect_focus_ratios_core(model, image_batches, total_items, img_size):
+def _collect_focus_ratios_core(model, image_batches, total_items, img_size, cfg: Optional[Dict[str, Any]] = None):
     """
-    Shared core for focus-ratio collection regardless of dataset source.
+    Shared core for per-image focus scores regardless of dataset source.
     `image_batches` should yield tensors shaped like (1, H, W, C).
     """
+    cfg = dict(CONFIG if cfg is None else {**CONFIG, **cfg})
+    focus_metric = str(cfg.get("focus_metric", "focus_ratio"))
+    roi_threshold = float(cfg.get("roi_threshold", 0.5))
+    eps = float(cfg.get("eps", 1e-8))
+
     gradcam = CustomGradCAM(model)
     ratios = []
     face_ok = 0
@@ -102,16 +117,24 @@ def _collect_focus_ratios_core(model, image_batches, total_items, img_size):
             method="bilinear",
             antialias=True,
         ).numpy()[..., 0]
+        heatmap = np.clip(heatmap, 0.0, None).astype(np.float32)
 
         mask = create_landmark_mask(
             image_rgb_uint8,
             img_size,
-            background_mask_value=float(CONFIG.get("background_mask_value", 0.0)),
-            landmark_box_half_size=int(CONFIG.get("landmark_box_half_size", 12)),
+            background_mask_value=float(cfg.get("background_mask_value", 0.0)),
+            landmark_box_half_size=int(cfg.get("landmark_box_half_size", 12)),
         )
         if mask is not None:
             face_ok += 1
-            ratios.append(compute_focus_ratio(heatmap, mask))
+            score, _ = compute_focus_score(
+                heatmap,
+                mask,
+                metric=focus_metric,
+                roi_threshold=roi_threshold,
+                eps=eps,
+            )
+            ratios.append(score)
 
         if (idx + 1) % 100 == 0:
             print(f"  Processed {idx+1}/{total_items} | face_ok={face_ok}")
@@ -125,7 +148,13 @@ def _collect_focus_ratios_core(model, image_batches, total_items, img_size):
     return ratios, stats
 
 
-def collect_pred_class_focus_ratios_for_model(model, data_dir, img_size, class_names):
+def collect_pred_class_focus_ratios_for_model(
+    model,
+    data_dir,
+    img_size,
+    class_names,
+    cfg: Optional[Dict[str, Any]] = None,
+):
     """
     Returns:
       focus_ratios: np.array (only face_ok==1)
@@ -143,6 +172,7 @@ def collect_pred_class_focus_ratios_for_model(model, data_dir, img_size, class_n
         image_batches=_image_batches(),
         total_items=len(file_paths),
         img_size=img_size,
+        cfg=cfg,
     )
 
 
@@ -151,6 +181,7 @@ def collect_focus_ratios_from_fold_val(
     fold_id: int,
     img_size: Tuple[int, int],
     fold_datasets_dir: str,
+    cfg: Optional[Dict[str, Any]] = None,
 ):
     """
     Val split from ``fold_datasets/fold_{fold_id}.json`` (same layout as ``cv_main`` / ``fold_functions``).
@@ -182,6 +213,7 @@ def collect_focus_ratios_from_fold_val(
         image_batches=_image_batches(),
         total_items=len(val_files),
         img_size=img_size,
+        cfg=cfg,
     )
 
 
@@ -202,16 +234,19 @@ def plot_focus_ratio_by_model(
     threshold_T=None,
     metadata_text="",
     summary_by_label: Optional[Dict[str, Dict[str, Any]]] = None,
+    model_order: Optional[List[str]] = None,
 ):
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    fig.suptitle(f'Focus Ratio Distribution by Model - {dataset_name}', fontsize=16, fontweight='bold')
+    labels = list(model_order) if model_order else list(results_dict.keys())
+    labels = [lbl for lbl in labels if lbl in results_dict]
+    if not labels:
+        return
 
-    order = [
-        ("original", 0, 0),
-        ("reward", 0, 1),
-        ("log-reward", 1, 0),
-        ("exp-reward", 1, 1),
-    ]
+    n = len(labels)
+    n_cols = 2 if n > 1 else 1
+    n_rows = int(math.ceil(n / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(7 * n_cols, 5 * n_rows))
+    fig.suptitle(f'Focus Ratio Distribution by Model - {dataset_name}', fontsize=16, fontweight='bold')
+    axes_arr = np.array(axes).reshape(-1)
 
     # ---------- 1) GLOBAL X RANGE ----------
     x_min, x_max = _resolve_plot_range(results_dict, cfg)
@@ -222,7 +257,7 @@ def plot_focus_ratio_by_model(
 
     # ---------- 3) GLOBAL Y RANGE ----------
     global_ymax = 0.0
-    for label, _, _ in order:
+    for label in labels:
         vals = results_dict.get(label, np.array([]))
         if vals is None or len(vals) == 0:
             continue
@@ -230,15 +265,11 @@ def plot_focus_ratio_by_model(
         global_ymax = max(global_ymax, float(hist.max()))
     global_ymax *= 1.10 if global_ymax > 0 else 1.0
 
-    colors = {
-        "original": "blue",
-        "reward": "green",
-        "log-reward": "orange",
-        "exp-reward": "red",
-    }
+    base_palette = ["blue", "green", "orange", "red", "purple", "brown", "teal", "magenta", "gray"]
+    colors = {label: base_palette[i % len(base_palette)] for i, label in enumerate(labels)}
 
-    for label, grid_row, col in order:
-        ax = axes[grid_row, col]
+    for idx, label in enumerate(labels):
+        ax = axes_arr[idx]
         ratios = results_dict.get(label, np.array([]))
         if ratios is None:
             ratios = np.array([])
@@ -308,17 +339,23 @@ def plot_focus_ratio_by_model(
                 family='monospace', bbox=dict(boxstyle='round', facecolor='white', alpha=0.5)
             )
 
+    for j in range(len(labels), len(axes_arr)):
+        axes_arr[j].axis("off")
+
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
     print(f"[Model Comparison] Histogram saved: {output_path}")
 
 
-def plot_fold_boxplot(rows: List[Dict[str, Any]], output_path: str) -> None:
+def plot_fold_boxplot(rows: List[Dict[str, Any]], output_path: str, model_order: Optional[List[str]] = None) -> None:
     grouped: Dict[str, List[float]] = {}
     for r in rows:
         grouped.setdefault(str(r["model_label"]), []).append(float(r["mean_focus"]))
-    labels = [k for k in ["original", "reward", "log-reward", "exp-reward"] if k in grouped]
+    if model_order:
+        labels = [k for k in model_order if k in grouped]
+    else:
+        labels = sorted(grouped.keys())
     if not labels:
         return
     data = [grouped[k] for k in labels]
@@ -546,12 +583,13 @@ def _compute_fold_summary_rows(
     stats_by_model: Dict[str, Dict[str, Any]],
     model_paths: Dict[str, str],
     cfg: Dict[str, Any],
+    baseline_label: str,
 ) -> List[Dict[str, Any]]:
-    if "original" not in ratios_by_model or len(ratios_by_model["original"]) == 0:
-        raise RuntimeError(f"Fold {fold_id}: baseline 'original' ratios missing/empty.")
+    if baseline_label not in ratios_by_model or len(ratios_by_model[baseline_label]) == 0:
+        raise RuntimeError(f"Fold {fold_id}: baseline '{baseline_label}' ratios missing/empty.")
 
-    T = float(np.median(ratios_by_model["original"]))
-    baseline_ratios = ratios_by_model["original"]
+    T = float(np.median(ratios_by_model[baseline_label]))
+    baseline_ratios = ratios_by_model[baseline_label]
     P_baseline = float(np.mean(baseline_ratios > T))
 
     x_min, x_max = _resolve_plot_range(ratios_by_model, cfg)
@@ -580,7 +618,12 @@ def _compute_fold_summary_rows(
             "data_dir": data_dir,
             "img_size": list(img_size),
             "model_label": label,
+            "baseline_label": baseline_label,
             "model_path": model_paths.get(label, ""),
+            "focus_metric": str(cfg.get("focus_metric", "focus_ratio")),
+            "focus_metric_description": FOCUS_METRIC_LABELS.get(
+                str(cfg.get("focus_metric", "focus_ratio")), ""
+            ),
             "threshold_source": cfg.get("threshold_source", "baseline_median"),
             "threshold_T": T,
             "P_focus_above_T": p_above,
@@ -647,11 +690,11 @@ def _load_val_metrics_for_fold(model_paths: Dict[str, str]) -> Dict[str, Dict[st
     return metrics_by_label
 
 
-def _aggregate_by_weight_type(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _aggregate_by_weight_type(rows: List[Dict[str, Any]], baseline_label: str) -> List[Dict[str, Any]]:
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     for row in rows:
         label = row.get("model_label")
-        if label == "original":
+        if label == baseline_label:
             continue
         key = str(row.get("weight_type", label))
         grouped.setdefault(key, []).append(row)
@@ -713,6 +756,7 @@ def run_single_fold_comparison(
     output_dir: str,
     experiment_id: str = "default",
     weight_type: Optional[str] = None,
+    baseline_label: str = "original",
     config_override: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     cfg = dict(CONFIG)
@@ -747,6 +791,7 @@ def run_single_fold_comparison(
                 fold_id=fold_id,
                 img_size=img_size,
                 fold_datasets_dir=fold_datasets_dir,
+                cfg=cfg,
             )
             ratios_by_model[label] = ratios
             stats_by_model[label] = stats
@@ -774,11 +819,12 @@ def run_single_fold_comparison(
         stats_by_model=stats_by_model,
         model_paths=model_paths,
         cfg=cfg,
+        baseline_label=baseline_label,
     )
     val_metrics_by_label = _load_val_metrics_for_fold(model_paths)
     if val_metrics_by_label:
         print(f"[VAL METRICS] fold={fold_id} loaded metrics:")
-        for label_key in ["original", "reward", "log-reward", "exp-reward"]:
+        for label_key in model_paths.keys():
             if label_key not in val_metrics_by_label:
                 continue
             m = val_metrics_by_label[label_key]
@@ -810,6 +856,7 @@ def run_single_fold_comparison(
         threshold_T=threshold_T,
         metadata_text=metadata_text,
         summary_by_label={str(r["model_label"]): r for r in summary_rows},
+        model_order=[m["label"] for m in model_configs],
     )
     print_summary_table(summary_rows, f"{dataset_name}_fold_{fold_id}")
     print_summary_table_markdown(summary_rows, f"{dataset_name}_fold_{fold_id}")
@@ -824,6 +871,7 @@ def run_multi_fold_comparison(
     output_dir: str = "artifacts/model_comparison",
     experiment_id: str = "model_comparison_folds",
     weight_type_map_by_label: Optional[Dict[str, str]] = None,
+    baseline_label: str = "original",
     config_override: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     os.makedirs(output_dir, exist_ok=True)
@@ -851,6 +899,7 @@ def run_multi_fold_comparison(
             output_dir=output_dir,
             experiment_id=experiment_id,
             weight_type="mixed",
+            baseline_label=baseline_label,
             config_override=config_override,
         )
         for row in summary_rows:
@@ -858,7 +907,7 @@ def run_multi_fold_comparison(
             append_jsonl(fold_metrics_path, row)
         all_rows.extend(summary_rows)
 
-    aggregates = _aggregate_by_weight_type(all_rows)
+    aggregates = _aggregate_by_weight_type(all_rows, baseline_label=baseline_label)
     _save_aggregates(
         aggregates=aggregates,
         aggregate_json_path=aggregate_json_path,
@@ -867,7 +916,9 @@ def run_multi_fold_comparison(
 
     os.makedirs(os.path.join(output_dir, "plots"), exist_ok=True)
     plot_aggregate_metrics(aggregates, aggregate_plot_path)
-    plot_fold_boxplot(all_rows, fold_boxplot_path)
+    discovered_order = [m["label"] for fid in fold_ids for m in model_map_by_fold.get(fid, [])]
+    model_order = list(dict.fromkeys(discovered_order))
+    plot_fold_boxplot(all_rows, fold_boxplot_path, model_order=model_order)
     recommendation_path = _save_recommendation_text(
         output_dir=output_dir,
         aggregates=aggregates,
@@ -915,7 +966,9 @@ if __name__ == "__main__":
             continue
         model = tf.keras.models.load_model(model_path, compile=False)
         print(f"[RUN] Collecting focus ratios for {label} ...")
-        ratios, stats = collect_pred_class_focus_ratios_for_model(model, data_dir, img_size, cfg["class_names"])
+        ratios, stats = collect_pred_class_focus_ratios_for_model(
+            model, data_dir, img_size, cfg["class_names"], cfg=cfg
+        )
         ratios_by_model[label] = ratios
         stats_by_model[label] = stats
 

@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "presets": [
+    {
+      "name": "weights_percentile (P60, bg=0)",
+      "spec_id": "compute_weights",
+      "params": {
+        "base_run": "baseline",
+        "output_dir": "weights_percentile",
+        "weight_formula": "autoopt",
+        "background_mask_value": 0.0,
+        "fold_start": 1,
+        "fold_end": 5,
+        "read_only_reward_dir": ""
+      }
+    },
+    {
+      "name": "weights_new_formula (density-gap, bg=0)",
+      "spec_id": "compute_density_gap_weights",
+      "params": {
+        "base_run": "baseline",
+        "output_dir": "weights_new_formula",
+        "weight_formula": "density_gap",
+        "background_mask_value": 0.0,
+        "fold_start": 1,
+        "fold_end": 5,
+        "read_only_reward_dir": ""
+      }
+    },
+    {
+      "name": "train reward_percentile_dark",
+      "spec_id": "cv_train",
+      "params": {
+        "run_name": "reward_percentile_dark",
+        "weights_dir": "weights_percentile",
+        "k": 5,
+        "epochs": 30,
+        "batch_size": 32,
+        "seed": 42,
+        "fold_start": 1,
+        "fold_end": 5
+      }
+    },
+    {
+      "name": "overlap — baseline vs reward vs log vs exp",
+      "spec_id": "overlap",
+      "params": {
+        "output_tag": "default",
+        "baseline_label": "baseline",
+        "fold_start": 1,
+        "fold_count": 5,
+        "background_mask_value": 0.0,
+        "model_runs": "baseline=baseline,reward=reward,log=log,exp=exp",
+        "no_resume": false
+      }
+    },
+    {
+      "name": "model comparison — density gap (new formula)",
+      "spec_id": "model_comparison",
+      "params": {
+        "output_tag": "density_gap_new_formula",
+        "fold_start": 1,
+        "fold_count": 5,
+        "baseline_label": "baseline",
+        "background_mask_value": 0.0,
+        "experiment_id": "density_gap_new_formula",
+        "focus_metric": "density_gap"
+      }
+    },
+    {
+      "name": "model comparison — inside density only",
+      "spec_id": "model_comparison",
+      "params": {
+        "output_tag": "inside_density_only",
+        "fold_start": 1,
+        "fold_count": 5,
+        "baseline_label": "baseline",
+        "background_mask_value": 0.0,
+        "experiment_id": "inside_density_only",
+        "focus_metric": "inside_density"
+      }
+    },
+    {
+      "name": "overlap — percentile_dark run only",
+      "spec_id": "overlap",
+      "params": {
+        "output_tag": "percentile_dark",
+        "baseline_label": "baseline",
+        "fold_start": 1,
+        "fold_count": 5,
+        "background_mask_value": 0.0,
+        "model_runs": "baseline=baseline,reward=reward_percentile_dark",
+        "no_resume": false
+      }
+    }
+  ]
+}

@@ -14,7 +14,7 @@ sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / "scripts"))
 sys.path.insert(0, str(repo_root / "scripts"))
 
-from auto_optimize_gradcam_weights import compute_fold_weights, plot_weights, save_weights
+from gradcam_density_gap_weights import compute_fold_weights, plot_weights, save_weights
 from log_exp_script import create_exp_weights, create_log_weights
 from src.fold_functions import load_fold_datasets
 
@@ -35,7 +35,7 @@ BASE_RUN_NAME = "baseline"
 dataset_dir = os.path.join(project_root, "dataset")
 fold_dataset_dir = os.path.join(project_root, "fold_datasets")
 runs_root = os.path.join(str(project_root), "runs")
-output_weights_path = os.path.join(project_root, "weights")
+output_weights_path = os.path.join(project_root, "weights_new_formula")
 os.makedirs(fold_dataset_dir, exist_ok=True)
 os.makedirs(output_weights_path, exist_ok=True)
 K = 5
