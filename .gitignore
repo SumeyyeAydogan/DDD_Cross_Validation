@@ -3,5 +3,8 @@
 /REPRODUCIBILITY_AND_TRAINING_NOTES_EN.md
 /runs
 /weights
+/weights_new_formula
+/weights_target_dark
+/weights_target_soft
 /weights_percentile
 /__pycache__

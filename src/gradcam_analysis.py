@@ -207,7 +207,10 @@ def analyze_tf_keras_gradcam(
         prob1 = float(preds[0][0])
         y_pred = 1 if prob1 >= 0.5 else 0
         prob_display = prob1 if y_pred == 1 else (1.0 - prob1)
-        score = CategoricalScore([0])  # single logit index
+        if y_pred == 1:
+            score = lambda outputs: outputs[:, 0]
+        else:
+            score = lambda outputs: -outputs[:, 0]
         
         # Compute CAM
         cam = gradcam(score, x_input, penultimate_layer=penultimate_layer)

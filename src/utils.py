@@ -231,7 +231,7 @@ def save_evaluation_report(report, roc_auc, test_accuracy, test_loss, save_path)
         f.write(report)
         f.write("\n\n=== ROC–AUC Score ===\n")
         f.write(str(roc_auc))
-        f.write(f"REAL Test accuracy: {test_accuracy:.4f}, Test loss: {test_loss:.4f}")
+        f.write(f" Test accuracy: {test_accuracy:.4f}, Test loss: {test_loss:.4f}")
 
 def save_cv_summary(run_dir, config, val_acc_per_fold, val_auc_per_fold):
     cv_summary_path = os.path.join(run_dir, "cv_summary.txt")
