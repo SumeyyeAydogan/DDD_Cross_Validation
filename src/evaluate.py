@@ -1,5 +1,5 @@
 import numpy as np
-from sklearn.metrics import classification_report, roc_auc_score
+from sklearn.metrics import classification_report, roc_auc_score, log_loss, accuracy_score
 from src.utils import plot_confusion_matrix, plot_roc_curve, plot_precision_recall_curve, save_evaluation_report
 from src.gradcam_analysis import (
     TF_KERAS_VIS_AVAILABLE,
@@ -97,10 +97,9 @@ def evaluate_model(
     report = classification_report(y_true, y_pred, target_names=class_names)
     er_save_path = os.path.join(plots_dir, f"{ds_name}_evaluation_report.txt") if plots_dir else None
     print(report)
-    eval_results = model.evaluate(test_ds, verbose=0)
-    test_loss = eval_results[0]
-    test_accuracy = eval_results[1]
-    print(f"REAL Test accuracy: {test_accuracy:.4f}, Test loss: {test_loss:.4f}")
+    test_loss = log_loss(y_true, y_pred_proba, labels=[0, 1])
+    test_accuracy = accuracy_score(y_true, y_pred)
+    print(f"Test accuracy: {test_accuracy:.4f}, Test loss: {test_loss:.4f}")
     save_evaluation_report(report, roc_auc, test_accuracy, test_loss, save_path=er_save_path)
 
     
