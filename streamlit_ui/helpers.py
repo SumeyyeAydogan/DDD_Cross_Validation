@@ -1,4 +1,4 @@
-"""Shared helpers for the Streamlit experiment viewer."""
+"""Shared helpers for the Streamlit analysis app (plots, paths, registry)."""
 from __future__ import annotations
 
 import csv

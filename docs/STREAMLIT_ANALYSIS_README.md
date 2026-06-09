@@ -61,7 +61,6 @@ Registry is merged with folders found under `runs/` (`merge_registry` in `stream
 | `streamlit_ui/analysis_core.py` | Data: metrics CSV, weight JSON, val batch inference, focus BG table |
 | `streamlit_ui/helpers.py` | Matplotlib figures, `st_image`/`st_dataframe` compatibility, registry parsing |
 | `streamlit_ui/experiment_core.py` | Experiment launcher (presets, subprocess jobs) |
-| `streamlit_app.py` | Lightweight viewer entry point → `streamlit_ui/viewer_app.py` |
 
 Package folder is `streamlit_ui/` (not `streamlit/`) so it does not shadow the PyPI `streamlit` library.
 
