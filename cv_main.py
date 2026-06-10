@@ -32,7 +32,8 @@ project_root = os.path.dirname(os.path.abspath(__file__))
 dataset_dir = os.path.join(project_root, "dataset")
 # Output: runs/<run_name>/fold_<k>/... (match scripts/model_comparison_integral.py and overlap_accuracy_comparison.py)
 run_manager = RunManager(run_name="baseline")
-output_dir = os.path.join(project_root, "fold_datasets")
+output_dir = os.path.join(project_root, "fold_datasets_v2")
+inner_val_ratio = 0.15
 # Reward / GradCAM sample weights: directory that contains fold_1_weights.json … fold_K_weights.json
 # (one file per fold; keys are paths relative to dataset_dir). None → default <project>/weights
 REWARD_WEIGHTS_DIR = None  # e.g. os.path.join(project_root, "weights", "my_reward_run")
@@ -52,6 +53,7 @@ config = {
     "learning_rate": 1e-4,
     "started_at": str(datetime.now()),
     "output_dir": output_dir,
+    "inner_val_ratio": inner_val_ratio,
     "weights_dir": weights_dir,
 }
 run_manager.save_config(config)
@@ -62,8 +64,8 @@ _set_global_determinism(config["seed"])
 gpus = tf.config.list_physical_devices("GPU")
 print("GPUs:", gpus)
 
-# 3) Save fold datasets
-#save_fold_datasets(config["dataset_dir"], config["k"], config["img_size"], config["seed"], config["class_names"], config["output_dir"])
+# 3) Save fold datasets (run once, then comment out)
+#save_fold_datasets(config["dataset_dir"], config["k"], config["img_size"], config["seed"], config["class_names"], config["output_dir"], val_ratio=config["inner_val_ratio"])
 
 val_acc_per_fold: List[float] = []
 val_auc_per_fold: List[float] = []
@@ -80,7 +82,7 @@ for fold_idx in range(config["k"]):
     use_sw = sw_path if os.path.isfile(sw_path) else None
     if use_sw:
         print(f"Using sample weights: {use_sw}")
-    train_ds, val_ds = create_tf_datasets_for_fold(
+    train_fit_ds, val_monitor_ds, test_ds = create_tf_datasets_for_fold(
         fold_idx,
         config["img_size"],
         config["batch_size"],
@@ -97,8 +99,8 @@ for fold_idx in range(config["k"]):
     callbacks = get_training_callbacks(fold_run_manager)
     history = train_model(
         model,
-        train_ds,
-        val_ds,
+        train_fit_ds,
+        val_monitor_ds,
         epochs=config["epochs_per_fold"],
         callbacks=callbacks,
         initial_epoch=0,
@@ -143,9 +145,9 @@ for fold_idx in range(config["k"]):
     print("?? Evaluating model on validation set...")
     evaluate_model(
         model,
-        val_ds,
+        test_ds,
         plots_dir=os.path.join(fold_run_manager.run_dir, "plots"),
-        ds_name="val",
+        ds_name="test",
     )
     print(f"Fold {fold_idx+1} model evaluated on validation set successfully")
 

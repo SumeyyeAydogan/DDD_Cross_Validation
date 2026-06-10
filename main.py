@@ -74,7 +74,7 @@ if __name__ == "__main__":
     weights_path = GRADCAM_WEIGHTS_FILE if os.path.isfile(GRADCAM_WEIGHTS_FILE) else None
     if weights_path:
         print(f"Using sample weights: {weights_path}")
-    train_ds, val_ds = create_tf_datasets_for_fold(
+    train_fit_ds, val_monitor_ds, test_ds = create_tf_datasets_for_fold(
         fold_idx,
         (224, 224),
         batch_size,
@@ -165,8 +165,8 @@ if __name__ == "__main__":
 
     history = train_model(
         model,
-        train_ds,
-        val_ds,
+        train_fit_ds,
+        val_monitor_ds,
         epochs=epoch_count,
         callbacks=callbacks,
         initial_epoch=initial_epoch,
@@ -196,9 +196,9 @@ if __name__ == "__main__":
     print("?? Evaluating model on validation set...")
     evaluate_model(
         model,
-        val_ds,
+        test_ds,
         plots_dir=os.path.join(run_manager.run_dir, "plots"),
-        ds_name="val",
+        ds_name="test",
     )
     print("? Validation evaluation completed!")
 

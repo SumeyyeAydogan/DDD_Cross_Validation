@@ -37,7 +37,7 @@ def main() -> None:
     parser.add_argument("--base-run", type=str, default="baseline", help="Run under runs/ with trained fold models")
     parser.add_argument("--output-dir", type=str, default="weights", help="Output directory for fold_*_weights.json")
     parser.add_argument("--dataset-dir", type=str, default=None)
-    parser.add_argument("--fold-datasets-dir", type=str, default="fold_datasets")
+    parser.add_argument("--fold-datasets-dir", type=str, default="fold_datasets_v2")
     parser.add_argument("--runs-root", type=str, default="runs")
     parser.add_argument("--k", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42)
@@ -104,7 +104,8 @@ def main() -> None:
         else:
             fold_tag = f"fold_{fold_n}"
             model_path = runs_root / args.base_run / fold_tag / "models" / f"{fold_tag}.h5"
-            train_files, _, _, _ = load_fold_datasets(fold_idx, str(fold_dataset_dir))
+            loaded = load_fold_datasets(fold_idx, str(fold_dataset_dir))
+            train_files = loaded[0]
             if not model_path.is_file():
                 raise FileNotFoundError(f"Model not found: {model_path}")
             backend = autoopt_weights if args.weight_formula == "autoopt" else density_gap_weights

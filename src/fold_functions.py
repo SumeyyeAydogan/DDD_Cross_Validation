@@ -4,56 +4,40 @@ import json
 from typing import Any, Dict, Optional
 
 from src.cv_dataloader import collect_file_paths, labels_from_paths, make_tf_dataset_from_paths
+from src.fold_split import build_fold_payloads
 
 
-def save_fold_datasets(base_dir, k, img_size, seed, class_names, output_dir="fold_datasets"):
+def save_fold_datasets(
+    base_dir,
+    k,
+    img_size,
+    seed,
+    class_names,
+    output_dir="fold_datasets",
+    val_ratio: float = 0.15,
+):
     file_paths = collect_file_paths(base_dir, class_names, img_size)
     labels = labels_from_paths(file_paths, class_names)
 
-    indices = np.arange(len(file_paths))
-    rng = np.random.default_rng(seed)
-    rng.shuffle(indices)
-    folds = np.array_split(indices, k)
-
     os.makedirs(output_dir, exist_ok=True)
 
-    for fold_idx in range(k):
-        val_idx = folds[fold_idx]
-        train_idx = np.concatenate([folds[j] for j in range(k) if j != fold_idx])
+    payloads = build_fold_payloads(
+        file_paths=file_paths,
+        labels=labels,
+        class_names=class_names,
+        k=k,
+        seed=seed,
+        val_ratio=val_ratio,
+        base_dir=base_dir,
+        img_size=img_size,
+    )
 
-        train_files = [file_paths[i] for i in train_idx]
-        val_files = [file_paths[i] for i in val_idx]
-
-        train_labels = labels[train_idx]
-        val_labels = labels[val_idx]
-
-        payload = {
-            "meta": {
-                "fold": fold_idx + 1,
-                "k": k,
-                "seed": seed,
-                "base_dir": os.path.abspath(base_dir),
-                "class_names": list(class_names),
-                "img_size": list(img_size) if isinstance(img_size, (tuple, list)) else img_size,
-                "train_size": int(len(train_files)),
-                "val_size": int(len(val_files)),
-            },
-            "train":
-                {
-                    "files": train_files,
-                    "labels": train_labels.tolist()
-                },
-            "val":
-                {
-                    "files": val_files,
-                    "labels": val_labels.tolist()
-                }
-        }
-
-        with open(os.path.join(output_dir, f"fold_{fold_idx+1}.json"), "w", encoding="utf-8") as f:
+    for payload in payloads:
+        fold_idx = payload["meta"]["fold"]
+        out_path = os.path.join(output_dir, f"fold_{fold_idx}.json")
+        with open(out_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
-
-        print(f"Fold {fold_idx+1} datasets saved to {os.path.join(output_dir, f'fold_{fold_idx+1}.json')}")
+        print(f"Fold {fold_idx} saved -> {out_path}")
 
 
 def load_fold_manifest(fold_idx: int, output_dir: str = "fold_datasets") -> Dict[str, Any]:
@@ -64,11 +48,27 @@ def load_fold_manifest(fold_idx: int, output_dir: str = "fold_datasets") -> Dict
 
 def load_fold_datasets(fold_idx, output_dir="fold_datasets"):
     data = load_fold_manifest(fold_idx, output_dir)
-    train_files = data["train"]["files"]
-    train_labels = data["train"]["labels"]
-    val_files = data["val"]["files"]
-    val_labels = data["val"]["labels"]
-    return train_files, train_labels, val_files, val_labels
+
+    # New schema (train_fit / val_monitor / test)
+    if "train_fit" in data:
+        return (
+            data["train_fit"]["files"],
+            data["train_fit"]["labels"],
+            data["val_monitor"]["files"],
+            data["val_monitor"]["labels"],
+            data["test"]["files"],
+            data["test"]["labels"],
+        )
+
+    # Legacy schema fallback
+    return (
+        data["train"]["files"],
+        data["train"]["labels"],
+        data["val"]["files"],
+        data["val"]["labels"],
+        None,
+        None,
+    )
 
 
 def sample_weights_for_train_files(
@@ -95,20 +95,23 @@ def create_tf_datasets_for_fold(
     sample_weights_path: Optional[str] = None,
     weights_base_dir: Optional[str] = None,
 ):
-    """
-    Build train/val tf.data pipelines from fold JSON.
-
-    If ``sample_weights_path`` points to a JSON dict (rel_path -> weight), train batches
-    become (x, y, sample_weight). Missing keys default to 1.0.
-
-    ``weights_base_dir``: root for rel_path keys (usually the same as dataset root used
-    when building weights). If None, uses ``meta.base_dir`` from the fold JSON.
-    """
     data = load_fold_manifest(fold_idx, output_dir)
-    train_files = data["train"]["files"]
-    train_labels = np.asarray(data["train"]["labels"], dtype=np.float32)
-    val_files = data["val"]["files"]
-    val_labels = np.asarray(data["val"]["labels"], dtype=np.float32)
+
+    if "train_fit" in data:
+        train_files = data["train_fit"]["files"]
+        train_labels = np.asarray(data["train_fit"]["labels"], dtype=np.float32)
+        val_monitor_files = data["val_monitor"]["files"]
+        val_monitor_labels = np.asarray(data["val_monitor"]["labels"], dtype=np.float32)
+        test_files = data["test"]["files"]
+        test_labels = np.asarray(data["test"]["labels"], dtype=np.float32)
+    else:
+        # Legacy JSON (train / val only)
+        train_files = data["train"]["files"]
+        train_labels = np.asarray(data["train"]["labels"], dtype=np.float32)
+        val_monitor_files = data["val"]["files"]
+        val_monitor_labels = np.asarray(data["val"]["labels"], dtype=np.float32)
+        test_files = data["val"]["files"]
+        test_labels = np.asarray(data["val"]["labels"], dtype=np.float32)
 
     train_sample_weights = None
     if sample_weights_path:
@@ -134,23 +137,17 @@ def create_tf_datasets_for_fold(
             f"matched {matched}/{len(train_files)} keys (others -> 1.0)"
         )
 
-    train_ds = make_tf_dataset_from_paths(
-        train_files,
-        train_labels,
-        img_size,
-        batch_size,
-        augment=True,
-        seed=seed,
-        sample_weights=train_sample_weights,
+    train_fit_ds = make_tf_dataset_from_paths(
+        train_files, train_labels, img_size, batch_size,
+        augment=True, seed=seed, sample_weights=train_sample_weights,
     )
-    val_ds = make_tf_dataset_from_paths(
-        val_files,
-        val_labels,
-        img_size,
-        batch_size,
-        augment=False,
-        seed=seed,
-        sample_weights=None,
+    val_monitor_ds = make_tf_dataset_from_paths(
+        val_monitor_files, val_monitor_labels, img_size, batch_size,
+        augment=False, seed=seed, sample_weights=None,
+    )
+    test_ds = make_tf_dataset_from_paths(
+        test_files, test_labels, img_size, batch_size,
+        augment=False, seed=seed, sample_weights=None,
     )
 
-    return train_ds, val_ds
+    return train_fit_ds, val_monitor_ds, test_ds

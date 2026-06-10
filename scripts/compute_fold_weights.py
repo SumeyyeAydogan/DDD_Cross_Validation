@@ -33,7 +33,7 @@ if gpus:
 
 BASE_RUN_NAME = "baseline"
 dataset_dir = os.path.join(project_root, "dataset")
-fold_dataset_dir = os.path.join(project_root, "fold_datasets")
+fold_dataset_dir = os.path.join(project_root, "fold_datasets_v2")
 runs_root = os.path.join(str(project_root), "runs")
 output_weights_path = os.path.join(project_root, "weights_new_formula")
 os.makedirs(fold_dataset_dir, exist_ok=True)
@@ -65,9 +65,8 @@ for fold_idx in range(K):
         fold_tag = f"fold_{fold_n}"
         fold_run_dir = os.path.join(runs_root, BASE_RUN_NAME, fold_tag)
         model_path = os.path.join(fold_run_dir, "models", f"{fold_tag}.h5")
-        train_files, train_labels, val_files, val_labels = load_fold_datasets(
-            fold_idx, fold_dataset_dir
-        )
+        loaded = load_fold_datasets(fold_idx, fold_dataset_dir)
+        train_files = loaded[0]
         if not os.path.isfile(model_path):
             raise FileNotFoundError(
                 f"Model not found: {model_path}\n"

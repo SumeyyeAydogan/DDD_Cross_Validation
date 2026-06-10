@@ -46,7 +46,7 @@ def main() -> None:
     parser.add_argument("--run-name", type=str, default="baseline")
     parser.add_argument("--weights-dir", type=str, default=None, help="Dir with fold_k_weights.json; omit for no weights")
     parser.add_argument("--dataset-dir", type=str, default=None)
-    parser.add_argument("--fold-datasets-dir", type=str, default="fold_datasets")
+    parser.add_argument("--fold-datasets-dir", type=str, default="fold_datasets_v2")
     parser.add_argument("--k", type=int, default=5)
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=32)
@@ -99,7 +99,7 @@ def main() -> None:
                 sw_path = candidate
                 print(f"Using sample weights: {sw_path}")
 
-        train_ds, val_ds = create_tf_datasets_for_fold(
+        train_fit_ds, val_monitor_ds, test_ds = create_tf_datasets_for_fold(
             fold_idx,
             config["img_size"],
             config["batch_size"],
@@ -114,8 +114,8 @@ def main() -> None:
         callbacks = get_training_callbacks(fold_run_manager)
         history = train_model(
             model,
-            train_ds,
-            val_ds,
+            train_fit_ds,
+            val_monitor_ds,
             epochs=config["epochs_per_fold"],
             callbacks=callbacks,
             initial_epoch=0,
@@ -133,10 +133,10 @@ def main() -> None:
 
         evaluate_model(
             model,
-            val_ds,
+            test_ds,
             plots_dir=plots_dir,
             class_names=list(config["class_names"]),
-            ds_name="val",
+            ds_name="test",
         )
 
         val_acc_per_fold.append(float(max(history.history.get("val_accuracy", [0.0]))))
