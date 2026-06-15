@@ -46,6 +46,17 @@ def load_fold_manifest(fold_idx: int, output_dir: str = "fold_datasets") -> Dict
         return json.load(f)
 
 
+def resolve_train_fit_split(data: Dict[str, Any]):
+    """Return (files, labels, source_key) for threshold fitting / weights."""
+    if "train_fit" in data:
+        block = data["train_fit"]
+        return block["files"], block["labels"], "train_fit"
+    if "train" in data:
+        block = data["train"]
+        return block["files"], block["labels"], "train"
+    raise KeyError("Fold JSON must contain train_fit or train")
+
+
 def load_fold_datasets(fold_idx, output_dir="fold_datasets"):
     data = load_fold_manifest(fold_idx, output_dir)
 

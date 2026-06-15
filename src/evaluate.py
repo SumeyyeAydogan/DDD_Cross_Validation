@@ -17,6 +17,7 @@ def evaluate_model(
     misclassified_only=False,
     ds_name="test",
     num_gradcam_samples=10,
+    threshold=0.5,
 ):
     """
     Evaluate model performance on test dataset
@@ -50,7 +51,7 @@ def evaluate_model(
         
         # For binary classification: y_batch is already 0 or 1
         y_true.extend(y_batch.numpy().flatten())
-        y_pred.extend((preds > 0.5).astype(int).flatten())  # Threshold 0.5
+        y_pred.extend((preds >= threshold).astype(int).flatten())
         y_pred_proba.extend(preds.flatten())
     
     # Convert to numpy arrays
@@ -139,6 +140,7 @@ def evaluate_model(
                 output_dir=gradcam_dir,
                 class_names=tuple(class_names),
                 include_buckets=buckets,
+                threshold=threshold,
             )
         except Exception as e:
             print(f"[GradCAM] GPU path failed: {e}")
@@ -151,6 +153,7 @@ def evaluate_model(
                     output_dir=gradcam_dir,
                     class_names=tuple(class_names),
                     include_buckets=buckets,
+                    threshold=threshold,
                 )
     else:
         print(
@@ -165,11 +168,16 @@ def evaluate_model(
             seed=42,
             log_file=None,
             include_buckets=buckets,
+            threshold=threshold,
         )
     
     # 7) Return metrics for further analysis
     return {
-        'y_true': y_true,
-        'y_pred': y_pred,
-        'y_pred_proba': y_pred_proba
+        "y_true": y_true,
+        "y_pred": y_pred,
+        "y_pred_proba": y_pred_proba,
+        "accuracy": test_accuracy,
+        "roc_auc": roc_auc,
+        "log_loss": test_loss,
+        "threshold": threshold,
     }

@@ -157,7 +157,12 @@ def parse_evaluation_report(text: str) -> Dict[str, Any]:
 
 def parse_cv_summary(text: str) -> Dict[str, float]:
     out: Dict[str, float] = {}
-    for key in ("val_accuracy_mean", "val_accuracy_std", "val_auc_mean", "val_auc_std"):
+    keys = (
+        "val_accuracy_mean", "val_accuracy_std", "val_auc_mean", "val_auc_std",
+        "test_accuracy_mean", "test_accuracy_std", "test_auc_mean", "test_auc_std",
+        "test_loss_mean", "test_loss_std", "threshold_mean",
+    )
+    for key in keys:
         m = re.search(rf"{key}\s*=\s*([0-9.+-eE]+)", text)
         if m:
             out[key] = float(m.group(1))

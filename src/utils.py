@@ -233,21 +233,88 @@ def save_evaluation_report(report, roc_auc, test_accuracy, test_loss, save_path)
         f.write(str(roc_auc))
         f.write(f" Test accuracy: {test_accuracy:.4f}, Test loss: {test_loss:.4f}")
 
-def save_cv_summary(run_dir, config, val_acc_per_fold, val_auc_per_fold):
+def metrics_at_best_val_auc(history) -> tuple[float, float, int]:
+    """Return val_accuracy, val_auc, and 0-based epoch index at max val_auc."""
+    h = history.history if hasattr(history, "history") else history
+    val_aucs = h.get("val_auc") or []
+    val_accs = h.get("val_accuracy") or []
+    if not val_aucs:
+        return float("nan"), float("nan"), -1
+    best_idx = int(np.argmax(val_aucs))
+    val_acc = float(val_accs[best_idx]) if best_idx < len(val_accs) else float("nan")
+    return val_acc, float(val_aucs[best_idx]), best_idx
+
+
+def save_cv_summary(
+    run_dir,
+    config,
+    val_acc_per_fold,
+    val_auc_per_fold,
+    test_acc_per_fold=None,
+    test_auc_per_fold=None,
+    test_loss_per_fold=None,
+    threshold_per_fold=None,
+    best_epoch_per_fold=None,
+):
     cv_summary_path = os.path.join(run_dir, "cv_summary.txt")
     val_acc_mean = float(np.mean(val_acc_per_fold)) if val_acc_per_fold else float("nan")
     val_acc_std = float(np.std(val_acc_per_fold)) if val_acc_per_fold else float("nan")
     val_auc_mean = float(np.mean(val_auc_per_fold)) if val_auc_per_fold else float("nan")
     val_auc_std = float(np.std(val_auc_per_fold)) if val_auc_per_fold else float("nan")
+
+    test_acc_mean = float(np.mean(test_acc_per_fold)) if test_acc_per_fold else float("nan")
+    test_acc_std = float(np.std(test_acc_per_fold)) if test_acc_per_fold else float("nan")
+    test_auc_mean = float(np.mean(test_auc_per_fold)) if test_auc_per_fold else float("nan")
+    test_auc_std = float(np.std(test_auc_per_fold)) if test_auc_per_fold else float("nan")
+    test_loss_mean = float(np.mean(test_loss_per_fold)) if test_loss_per_fold else float("nan")
+    test_loss_std = float(np.std(test_loss_per_fold)) if test_loss_per_fold else float("nan")
+    threshold_mean = float(np.mean(threshold_per_fold)) if threshold_per_fold else float("nan")
+
     with open(cv_summary_path, "w", encoding="utf-8") as f:
         f.write("Cross-validation summary\n")
         f.write(f"Folds           : {config['k']}\n")
         f.write(f"Epochs/fold     : {config['epochs_per_fold']}\n")
         f.write(f"Base dir        : {config['dataset_dir']}\n\n")
+
+        f.write("=== Validation (val_monitor @ best val_auc epoch) ===\n")
         f.write(f"val_accuracy_mean = {val_acc_mean:.4f}\n")
         f.write(f"val_accuracy_std  = {val_acc_std:.4f}\n")
         f.write(f"val_auc_mean      = {val_auc_mean:.4f}\n")
-        f.write(f"val_auc_std       = {val_auc_std:.4f}\n")
+        f.write(f"val_auc_std       = {val_auc_std:.4f}\n\n")
+
+        f.write("=== Test (tuned threshold on train_fit) ===\n")
+        f.write(f"test_accuracy_mean = {test_acc_mean:.4f}\n")
+        f.write(f"test_accuracy_std  = {test_acc_std:.4f}\n")
+        f.write(f"test_auc_mean      = {test_auc_mean:.4f}\n")
+        f.write(f"test_auc_std       = {test_auc_std:.4f}\n")
+        f.write(f"test_loss_mean     = {test_loss_mean:.4f}\n")
+        f.write(f"test_loss_std      = {test_loss_std:.4f}\n")
+        f.write(f"threshold_mean     = {threshold_mean:.4f}\n\n")
+
+        n_folds = max(
+            len(val_acc_per_fold),
+            len(test_acc_per_fold or []),
+        )
+        f.write("=== Per fold ===\n")
+        for i in range(n_folds):
+            parts = [f"fold {i + 1}:"]
+            if best_epoch_per_fold and i < len(best_epoch_per_fold):
+                ep = best_epoch_per_fold[i]
+                if ep >= 0:
+                    parts.append(f"best_val_auc_epoch={ep + 1}")
+            if val_acc_per_fold and i < len(val_acc_per_fold):
+                parts.append(f"val_acc={val_acc_per_fold[i]:.4f}")
+            if val_auc_per_fold and i < len(val_auc_per_fold):
+                parts.append(f"val_auc={val_auc_per_fold[i]:.4f}")
+            if threshold_per_fold and i < len(threshold_per_fold):
+                parts.append(f"threshold={threshold_per_fold[i]:.4f}")
+            if test_acc_per_fold and i < len(test_acc_per_fold):
+                parts.append(f"test_acc={test_acc_per_fold[i]:.4f}")
+            if test_auc_per_fold and i < len(test_auc_per_fold):
+                parts.append(f"test_auc={test_auc_per_fold[i]:.4f}")
+            if test_loss_per_fold and i < len(test_loss_per_fold):
+                parts.append(f"test_loss={test_loss_per_fold[i]:.4f}")
+            f.write("  " + "  ".join(parts) + "\n")
 
 
 def plot_confusion_matrix(y_true, y_pred, class_names=['NotDrowsy', 'Drowsy'], save_path=None):

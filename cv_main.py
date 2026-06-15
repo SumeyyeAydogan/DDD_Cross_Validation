@@ -17,7 +17,8 @@ from src.fold_functions import save_fold_datasets, create_tf_datasets_for_fold
 from src.model import build_model
 from src.train import train_model
 from src.evaluate import evaluate_model
-from src.utils import plot_history, plot_metrics, save_cv_summary
+from src.threshold import fit_threshold_for_fold, save_threshold
+from src.utils import plot_history, plot_metrics, save_cv_summary, metrics_at_best_val_auc
 from src.callbacks import get_training_callbacks, get_time_history, summarize_epoch_times
 
 def _set_global_determinism(seed: int) -> None:
@@ -69,6 +70,11 @@ print("GPUs:", gpus)
 
 val_acc_per_fold: List[float] = []
 val_auc_per_fold: List[float] = []
+best_epoch_per_fold: List[int] = []
+test_acc_per_fold: List[float] = []
+test_auc_per_fold: List[float] = []
+test_loss_per_fold: List[float] = []
+threshold_per_fold: List[float] = []
 fold_training_times: List[dict] = []
 
 # 4) Train model for each fold
@@ -119,18 +125,17 @@ for fold_idx in range(config["k"]):
         f"| avg/epoch={fold_time['avg_seconds_per_epoch']:.1f}s"
     )
 
-    # 4.3) Get best validation metrics across epochs.
-    val_acc = float(np.nanmax(history.history.get("val_accuracy", [float("nan")])))
-    val_auc = float(np.nanmax(history.history.get("val_auc", [float("nan")])))
-
+    # 4.3) val_monitor metrics at the epoch with best val_auc
+    val_acc, val_auc, best_epoch = metrics_at_best_val_auc(history)
     print(
-        f"Fold {fold_idx + 1}: val_accuracy={val_acc:.4f} | val_auc={val_auc:.4f}"
+        f"Fold {fold_idx + 1}: best_val_auc_epoch={best_epoch + 1} "
+        f"val_accuracy={val_acc:.4f} | val_auc={val_auc:.4f}"
     )
-
     if not np.isnan(val_acc):
         val_acc_per_fold.append(float(val_acc))
     if not np.isnan(val_auc):
         val_auc_per_fold.append(float(val_auc))
+    best_epoch_per_fold.append(best_epoch)
 
     # 4.4) Plot training graphs and save them
     print("?? Plotting training history...")
@@ -141,14 +146,26 @@ for fold_idx in range(config["k"]):
     metrics_plot_path = os.path.join(fold_run_manager.run_dir, "plots", "training_metrics.png")
     plot_metrics(history, save_path=metrics_plot_path)
 
-    # 4.5) Evaluate on validation set
-    print("?? Evaluating model on validation set...")
-    evaluate_model(
+    # 4.5) Threshold on train_fit, evaluate on test
+    th_path = os.path.join(fold_run_manager.run_dir, "threshold.json")
+    threshold, th_source = fit_threshold_for_fold(
+        model, fold_idx, config["img_size"], config["batch_size"], config["seed"], config["output_dir"]
+    )
+    save_threshold(th_path, threshold, source=th_source)
+    threshold_per_fold.append(threshold)
+    print(f"Fold {fold_idx+1} threshold (train_fit, balanced_accuracy): {threshold:.4f}")
+
+    print("?? Evaluating model on test set...")
+    test_metrics = evaluate_model(
         model,
         test_ds,
         plots_dir=os.path.join(fold_run_manager.run_dir, "plots"),
         ds_name="test",
+        threshold=threshold,
     )
+    test_acc_per_fold.append(float(test_metrics["accuracy"]))
+    test_auc_per_fold.append(float(test_metrics["roc_auc"]))
+    test_loss_per_fold.append(float(test_metrics["log_loss"]))
     print(f"Fold {fold_idx+1} model evaluated on validation set successfully")
 
     # 4.6) Save final model
@@ -167,4 +184,14 @@ config["training_time"] = {
     "per_fold": fold_training_times,
 }
 run_manager.save_config(config)
-save_cv_summary(run_manager.run_dir, config, val_acc_per_fold, val_auc_per_fold)
+save_cv_summary(
+    run_manager.run_dir,
+    config,
+    val_acc_per_fold,
+    val_auc_per_fold,
+    test_acc_per_fold=test_acc_per_fold,
+    test_auc_per_fold=test_auc_per_fold,
+    test_loss_per_fold=test_loss_per_fold,
+    threshold_per_fold=threshold_per_fold,
+    best_epoch_per_fold=best_epoch_per_fold,
+)

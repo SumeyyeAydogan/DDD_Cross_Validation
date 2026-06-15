@@ -30,7 +30,8 @@ def analyze_subjects_gradcam(
     img_size=(224, 224),
     seed=42,
     log_file=None,
-    include_buckets=None
+    include_buckets=None,
+    threshold=0.5,
 ):
     """Run subject-wise GradCAM analysis and save TP/TN/FP/FN examples."""
     rng = np.random.default_rng(seed)
@@ -88,7 +89,7 @@ def analyze_subjects_gradcam(
 
             preds = model.predict(img_arr[None, ...], verbose=0)
             prob = float(preds[0][0])
-            pred_cls = 1 if prob >= 0.5 else 0
+            pred_cls = 1 if prob >= threshold else 0
             disp_prob = prob if pred_cls == 1 else (1.0 - prob)
 
             if true_label == 1 and pred_cls == 1:
@@ -105,7 +106,7 @@ def analyze_subjects_gradcam(
                 sample_counter[bucket] = sample_counter.get(bucket, 0) + 1
                 fname_base = os.path.splitext(os.path.basename(path))[0]
                 out_path = os.path.join(output_dir, bucket, f"{fname_base}_{sample_counter[bucket]:03d}.png")
-                cam.visualize(img_arr, class_names, true_idx=true_label, save_path=out_path)
+                cam.visualize(img_arr, class_names, true_idx=true_label, save_path=out_path, threshold=threshold)
                 cam._log(f"🧍 {subj}: Truth={class_names[true_label]}, Pred={class_names[pred_cls]} "
                          f"({disp_prob:.2f}) -> {bucket}")
                 saved += 1
@@ -122,7 +123,8 @@ def analyze_tf_keras_gradcam(
     class_names=('NotDrowsy', 'Drowsy'),
     seed=42,
     log_file=None,
-    include_buckets=None
+    include_buckets=None,
+    threshold=0.5,
 ):
     """
     Run subject-wise GradCAM analysis using tf-keras-vis library.
@@ -205,7 +207,7 @@ def analyze_tf_keras_gradcam(
         
         # Binary sigmoid classification
         prob1 = float(preds[0][0])
-        y_pred = 1 if prob1 >= 0.5 else 0
+        y_pred = 1 if prob1 >= threshold else 0
         prob_display = prob1 if y_pred == 1 else (1.0 - prob1)
         if y_pred == 1:
             score = lambda outputs: outputs[:, 0]
@@ -285,6 +287,7 @@ def analyze_gradcam_with_ds(
     seed=42,
     log_file=None,
     include_buckets=None,
+    threshold=0.5,
 ):
     import os
     import numpy as np
@@ -324,7 +327,7 @@ def analyze_gradcam_with_ds(
 
         pred = model.predict(img_np[None, ...], verbose=0)
         prob = float(pred.ravel()[0])
-        pred_cls = 1 if prob >= 0.5 else 0
+        pred_cls = 1 if prob >= threshold else 0
 
         if true_label == 1 and pred_cls == 1:
             bucket = "TP"
@@ -339,7 +342,7 @@ def analyze_gradcam_with_ds(
             continue
 
         out_path = os.path.join(output_dir, bucket, f"sample_{saved+1:03d}.png")
-        cam.visualize(img_np, class_names=class_names, true_idx=true_label, save_path=out_path)
+        cam.visualize(img_np, class_names=class_names, true_idx=true_label, save_path=out_path, threshold=threshold)
         cam._log(f"saved={out_path} true={class_names[true_label]} pred={class_names[pred_cls]} prob={prob:.4f}")
         saved += 1
 

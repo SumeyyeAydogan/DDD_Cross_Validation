@@ -27,11 +27,12 @@ os.environ.setdefault("TF_CUDNN_DETERMINISTIC", "1")
 
 from src.callbacks import get_time_history, get_training_callbacks, summarize_epoch_times
 from src.evaluate import evaluate_model
+from src.threshold import fit_threshold_for_fold, save_threshold
 from src.fold_functions import create_tf_datasets_for_fold
 from src.model import build_model
 from src.run_manager import RunManager
 from src.train import train_model
-from src.utils import plot_history, plot_metrics, save_cv_summary
+from src.utils import plot_history, plot_metrics, save_cv_summary, metrics_at_best_val_auc
 
 
 def _set_global_determinism(seed: int) -> None:
@@ -88,6 +89,11 @@ def main() -> None:
 
     val_acc_per_fold: List[float] = []
     val_auc_per_fold: List[float] = []
+    best_epoch_per_fold: List[int] = []
+    test_acc_per_fold: List[float] = []
+    test_auc_per_fold: List[float] = []
+    test_loss_per_fold: List[float] = []
+    threshold_per_fold: List[float] = []
     fold_training_times: List[dict] = []
 
     for fold_idx in range(args.fold_start - 1, fold_end):
@@ -131,19 +137,48 @@ def main() -> None:
         plot_history(history.history, save_path=os.path.join(plots_dir, "training_history.png"))
         plot_metrics(history.history, save_path=os.path.join(plots_dir, "training_metrics.png"))
 
-        evaluate_model(
+        th_path = os.path.join(fold_run_manager.run_dir, "threshold.json")
+        threshold, th_source = fit_threshold_for_fold(
+            model, fold_idx, config["img_size"], config["batch_size"], config["seed"], config["output_dir"]
+        )
+        save_threshold(th_path, threshold, source=th_source)
+        threshold_per_fold.append(threshold)
+        print(f"Fold {fold_idx + 1} threshold (train_fit): {threshold:.4f}")
+
+        val_acc, val_auc, best_epoch = metrics_at_best_val_auc(history)
+        val_acc_per_fold.append(val_acc)
+        val_auc_per_fold.append(val_auc)
+        best_epoch_per_fold.append(best_epoch)
+
+        test_metrics = evaluate_model(
             model,
             test_ds,
             plots_dir=plots_dir,
             class_names=list(config["class_names"]),
             ds_name="test",
+            threshold=threshold,
+        )
+        test_acc_per_fold.append(float(test_metrics["accuracy"]))
+        test_auc_per_fold.append(float(test_metrics["roc_auc"]))
+        test_loss_per_fold.append(float(test_metrics["log_loss"]))
+
+        print(
+            f"Fold {fold_idx + 1} done. "
+            f"val@best_auc_epoch={best_epoch + 1} acc={val_acc:.4f} auc={val_auc:.4f} | "
+            f"test acc={test_metrics['accuracy']:.4f} auc={test_metrics['roc_auc']:.4f}"
         )
 
-        val_acc_per_fold.append(float(max(history.history.get("val_accuracy", [0.0]))))
-        val_auc_per_fold.append(float(max(history.history.get("val_auc", [0.0]))))
-        print(f"Fold {fold_idx + 1} done.")
-
-    save_cv_summary(run_manager.run_dir, config, val_acc_per_fold, val_auc_per_fold)
+    save_cv_summary(
+        run_manager.run_dir,
+        config,
+        val_acc_per_fold,
+        val_auc_per_fold,
+        test_acc_per_fold=test_acc_per_fold,
+        test_auc_per_fold=test_auc_per_fold,
+        test_loss_per_fold=test_loss_per_fold,
+        threshold_per_fold=threshold_per_fold,
+        best_epoch_per_fold=best_epoch_per_fold,
+    )
     run_manager.save_config({**config, "training_time": {"per_fold": fold_training_times}})
     print(f"CV complete. Run dir: {run_manager.run_dir}")
 

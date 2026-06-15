@@ -96,7 +96,7 @@ class CustomGradCAM:
         return np.clip(overlay, 0, 1)
 
     def visualize(self, image, class_names=('NotDrowsy', 'Drowsy'),
-                  true_idx=None, save_path=None):
+                  true_idx=None, save_path=None, threshold=0.5):
         """Generate GradCAM visualization."""
         if image.ndim == 3:
             image = np.expand_dims(image, 0)
@@ -104,7 +104,7 @@ class CustomGradCAM:
         # Use original model for probability prediction (with sigmoid activation)
         preds = self.original_model.predict(image, verbose=0)
         prob = float(preds[0][0])
-        pred_cls = 1 if prob >= 0.5 else 0
+        pred_cls = 1 if prob >= threshold else 0
         disp_prob = prob if pred_cls == 1 else (1.0 - prob)
 
         heatmap = self.compute_heatmap(image[0], class_idx=pred_cls)
