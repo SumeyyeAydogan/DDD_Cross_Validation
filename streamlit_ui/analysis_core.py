@@ -15,6 +15,7 @@ from src.focus_metrics import compute_focus_score
 from src.fold_functions import load_fold_manifest, sample_weights_for_train_files
 from src.gradcam import CustomGradCAM
 from src.mask_helpers import create_landmark_mask, image_to_float01_rgb, image_to_uint8_rgb
+from streamlit_ui.helpers import eval_report_path
 
 CLASS_NAMES: Tuple[str, str] = ("NotDrowsy", "Drowsy")
 
@@ -194,8 +195,8 @@ def collect_fold_run_summaries(project_root: Path, run_name: str) -> List[Dict[s
             continue
         hist = _load_metrics_csv_simple(fold_dir / "training_metrics.csv")
         best = best_val_from_history(hist)
-        report_path = fold_dir / "plots" / "val_evaluation_report.txt"
-        report = parse_evaluation_report(report_path.read_text(encoding="utf-8")) if report_path.is_file() else {}
+        report_path = eval_report_path(fold_dir)
+        report = parse_evaluation_report(report_path.read_text(encoding="utf-8")) if report_path else {}
         rows.append(
             {
                 "fold": fold_id,

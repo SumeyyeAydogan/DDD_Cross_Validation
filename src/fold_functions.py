@@ -1,10 +1,14 @@
 import numpy as np
 import os
 import json
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from src.cv_dataloader import collect_file_paths, labels_from_paths, make_tf_dataset_from_paths
-from src.fold_split import build_fold_payloads
+from src.fold_split import (
+    build_fold_payloads,
+    build_fold_payloads_random,
+    build_fold_payloads_stratified,
+)
 
 
 def save_fold_datasets(
@@ -15,22 +19,52 @@ def save_fold_datasets(
     class_names,
     output_dir="fold_datasets",
     val_ratio: float = 0.15,
+    split_method: str = "per_subject_round_robin",
 ):
     file_paths = collect_file_paths(base_dir, class_names, img_size)
     labels = labels_from_paths(file_paths, class_names)
 
     os.makedirs(output_dir, exist_ok=True)
 
-    payloads = build_fold_payloads(
-        file_paths=file_paths,
-        labels=labels,
-        class_names=class_names,
-        k=k,
-        seed=seed,
-        val_ratio=val_ratio,
-        base_dir=base_dir,
-        img_size=img_size,
-    )
+    if split_method == "per_subject_round_robin":
+        payloads = build_fold_payloads(
+            file_paths=file_paths,
+            labels=labels,
+            class_names=class_names,
+            k=k,
+            seed=seed,
+            val_ratio=val_ratio,
+            base_dir=base_dir,
+            img_size=img_size,
+        )
+    elif split_method == "stratified_round_robin":
+        payloads = build_fold_payloads_stratified(
+            file_paths=file_paths,
+            labels=labels,
+            class_names=class_names,
+            k=k,
+            seed=seed,
+            val_ratio=val_ratio,
+            base_dir=base_dir,
+            img_size=img_size,
+        )
+    elif split_method == "random_outer_fold_inner_val":
+        payloads = build_fold_payloads_random(
+            file_paths=file_paths,
+            labels=labels,
+            class_names=class_names,
+            k=k,
+            seed=seed,
+            val_ratio=val_ratio,
+            base_dir=base_dir,
+            img_size=img_size,
+        )
+    else:
+        raise ValueError(
+            f"Unknown split_method='{split_method}'. "
+            "Use 'per_subject_round_robin', 'stratified_round_robin', or "
+            "'random_outer_fold_inner_val'."
+        )
 
     for payload in payloads:
         fold_idx = payload["meta"]["fold"]
@@ -55,6 +89,17 @@ def resolve_train_fit_split(data: Dict[str, Any]):
         block = data["train"]
         return block["files"], block["labels"], "train"
     raise KeyError("Fold JSON must contain train_fit or train")
+
+
+def resolve_eval_split(data: Dict[str, Any]) -> Tuple[list, list, str]:
+    """Return (files, labels, split_name) for held-out evaluation / analysis."""
+    if "test" in data:
+        block = data["test"]
+        return block["files"], block["labels"], "test"
+    if "val" in data:
+        block = data["val"]
+        return block["files"], block["labels"], "val"
+    raise KeyError("Fold JSON must contain test or val")
 
 
 def load_fold_datasets(fold_idx, output_dir="fold_datasets"):

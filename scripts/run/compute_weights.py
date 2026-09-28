@@ -24,6 +24,7 @@ import auto_optimize_gradcam_weights as autoopt_weights
 import gradcam_density_gap_weights as density_gap_weights
 from log_exp_script import create_exp_weights, create_log_weights
 from src.fold_functions import load_fold_datasets
+from src.threshold import load_threshold
 
 
 def _set_global_seeds(seed: int) -> None:
@@ -43,6 +44,18 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--background-mask-value", type=float, default=0.0)
     parser.add_argument("--landmark-box-half-size", type=int, default=12)
+    parser.add_argument(
+        "--focus-metric",
+        type=str,
+        default="density_gap_shifted",
+        help="Focus metric for density_gap backend (see src.focus_metrics).",
+    )
+    parser.add_argument(
+        "--use-fold-threshold",
+        action="store_true",
+        help="Load decision threshold from fold threshold.json (density_gap backend).",
+    )
+    parser.add_argument("--default-decision-threshold", type=float, default=0.5)
     parser.add_argument(
         "--weight-formula",
         type=str,
@@ -87,6 +100,8 @@ def main() -> None:
     cfg = {
         "background_mask_value": float(args.background_mask_value),
         "landmark_box_half_size": int(args.landmark_box_half_size),
+        "focus_metric": args.focus_metric,
+        "decision_threshold": float(args.default_decision_threshold),
     }
 
     for fold_idx in range(args.fold_start - 1, fold_end):
@@ -103,21 +118,43 @@ def main() -> None:
             print(f"Fold {fold_n}: log+exp from {src}")
         else:
             fold_tag = f"fold_{fold_n}"
-            model_path = runs_root / args.base_run / fold_tag / "models" / f"{fold_tag}.h5"
-            loaded = load_fold_datasets(fold_idx, str(fold_dataset_dir))
-            train_files = loaded[0]
+            fold_run_dir = runs_root / args.base_run / fold_tag
+            model_path = fold_run_dir / "models" / f"{fold_tag}.h5"
+            train_files, _, _, _, _, _ = load_fold_datasets(fold_idx, str(fold_dataset_dir))
             if not model_path.is_file():
                 raise FileNotFoundError(f"Model not found: {model_path}")
+            run_cfg = dict(cfg)
+            if args.weight_formula == "density_gap" and args.use_fold_threshold:
+                threshold_path = fold_run_dir / "threshold.json"
+                if not threshold_path.is_file():
+                    raise FileNotFoundError(
+                        f"Threshold not found: {threshold_path}. "
+                        "Omit --use-fold-threshold to use --default-decision-threshold."
+                    )
+                run_cfg["decision_threshold"] = load_threshold(
+                    str(threshold_path),
+                    default=float(args.default_decision_threshold),
+                )
             backend = autoopt_weights if args.weight_formula == "autoopt" else density_gap_weights
             fold_weights = backend.compute_fold_weights(
                 train_files,
                 str(model_path),
                 dataset_dir,
-                cfg=cfg,
+                cfg=run_cfg if args.weight_formula == "density_gap" else {
+                    k: v for k, v in run_cfg.items()
+                    if k in ("background_mask_value", "landmark_box_half_size")
+                },
             )
             reward_json = str(out_prefix) + "_weights.json"
             backend.save_weights(fold_weights, reward_json)
-            backend.plot_weights(fold_weights, save_path=str(out_prefix) + "_weights.png")
+            if args.weight_formula == "density_gap":
+                backend.plot_weights(
+                    fold_weights,
+                    save_path=str(out_prefix) + "_weights.png",
+                    focus_metric=args.focus_metric,
+                )
+            else:
+                backend.plot_weights(fold_weights, save_path=str(out_prefix) + "_weights.png")
             print(f"Fold {fold_n}: saved {reward_json} ({args.weight_formula})")
 
         create_log_weights(

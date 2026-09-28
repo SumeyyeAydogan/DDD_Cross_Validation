@@ -33,8 +33,10 @@ project_root = os.path.dirname(os.path.abspath(__file__))
 dataset_dir = os.path.join(project_root, "dataset")
 # Output: runs/<run_name>/fold_<k>/... (match scripts/model_comparison_integral.py and overlap_accuracy_comparison.py)
 run_manager = RunManager(run_name="baseline")
-output_dir = os.path.join(project_root, "fold_datasets_v2")
+output_dir = os.path.join(project_root, "fold_datasets_v3")
 inner_val_ratio = 0.15
+# per_subject_round_robin | stratified_round_robin | random_outer_fold_inner_val
+split_method = "stratified_round_robin"
 # Reward / GradCAM sample weights: directory that contains fold_1_weights.json … fold_K_weights.json
 # (one file per fold; keys are paths relative to dataset_dir). None → default <project>/weights
 REWARD_WEIGHTS_DIR = None  # e.g. os.path.join(project_root, "weights", "my_reward_run")
@@ -55,6 +57,7 @@ config = {
     "started_at": str(datetime.now()),
     "output_dir": output_dir,
     "inner_val_ratio": inner_val_ratio,
+    "split_method": split_method,
     "weights_dir": weights_dir,
 }
 run_manager.save_config(config)
@@ -66,7 +69,16 @@ gpus = tf.config.list_physical_devices("GPU")
 print("GPUs:", gpus)
 
 # 3) Save fold datasets (run once, then comment out)
-#save_fold_datasets(config["dataset_dir"], config["k"], config["img_size"], config["seed"], config["class_names"], config["output_dir"], val_ratio=config["inner_val_ratio"])
+save_fold_datasets(
+    config["dataset_dir"],
+    config["k"],
+    config["img_size"],
+    config["seed"],
+    config["class_names"],
+    config["output_dir"],
+    val_ratio=config["inner_val_ratio"],
+    split_method=config["split_method"],
+)
 
 val_acc_per_fold: List[float] = []
 val_auc_per_fold: List[float] = []
@@ -166,7 +178,7 @@ for fold_idx in range(config["k"]):
     test_acc_per_fold.append(float(test_metrics["accuracy"]))
     test_auc_per_fold.append(float(test_metrics["roc_auc"]))
     test_loss_per_fold.append(float(test_metrics["log_loss"]))
-    print(f"Fold {fold_idx+1} model evaluated on validation set successfully")
+    print(f"Fold {fold_idx+1} model evaluated on test set successfully")
 
     # 4.6) Save final model
     print("?? Saving final model...")

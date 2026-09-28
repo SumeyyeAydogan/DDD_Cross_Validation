@@ -117,6 +117,34 @@ def model_h5_path(project_root: Path, run_name: str, fold_id: int) -> Path:
     return fold_run_dir(project_root, run_name, fold_id) / "models" / f"fold_{fold_id}.h5"
 
 
+def first_existing_file(directory: Path, names: List[str]) -> Optional[Path]:
+    """Return the first path under ``directory`` that exists (test before legacy val names)."""
+    for name in names:
+        p = directory / name
+        if p.is_file():
+            return p
+    return None
+
+
+def eval_report_path(fold_dir: Path) -> Optional[Path]:
+    return first_existing_file(
+        fold_dir / "plots",
+        ["test_evaluation_report.txt", "val_evaluation_report.txt"],
+    )
+
+
+EVAL_PLOT_CANDIDATES: List[Tuple[str, str]] = [
+    ("test_confusion_matrix.png", "Confusion matrix"),
+    ("val_confusion_matrix.png", "Confusion matrix (legacy)"),
+    ("confusion_matrix.png", "Confusion matrix"),
+    ("test_roc_curve.png", "ROC"),
+    ("val_roc_curve.png", "ROC (legacy)"),
+    ("test_precision_recall_curve.png", "PR curve"),
+    ("val_precision_recall_curve.png", "PR curve (legacy)"),
+    ("training_history.png", "Training history"),
+]
+
+
 def parse_run_registry(text: str) -> List[Tuple[str, str]]:
     """Lines: label=run_folder_name"""
     rows: List[Tuple[str, str]] = []

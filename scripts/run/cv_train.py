@@ -134,8 +134,8 @@ def main() -> None:
 
         plots_dir = os.path.join(fold_run_manager.run_dir, "plots")
         os.makedirs(plots_dir, exist_ok=True)
-        plot_history(history.history, save_path=os.path.join(plots_dir, "training_history.png"))
-        plot_metrics(history.history, save_path=os.path.join(plots_dir, "training_metrics.png"))
+        plot_history(history, save_path=os.path.join(plots_dir, "training_history.png"))
+        plot_metrics(history, save_path=os.path.join(plots_dir, "training_metrics.png"))
 
         th_path = os.path.join(fold_run_manager.run_dir, "threshold.json")
         threshold, th_source = fit_threshold_for_fold(

@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
+from collections import Counter, defaultdict
 from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
@@ -53,8 +55,10 @@ from streamlit_ui.experiment_core import (
     tail_log,
 )
 from streamlit_ui.helpers import (
+    EVAL_PLOT_CANDIDATES,
     build_weights_comparison_table,
     discover_run_names,
+    eval_report_path,
     fold_run_dir,
     list_folds_for_run,
     load_image_uint8,
@@ -133,8 +137,471 @@ def _registry_from_sidebar(sidebar, root: Path) -> List[Tuple[str, str]]:
     return registry
 
 
+def _run_option_labels(registry: List[Tuple[str, str]]) -> List[str]:
+    return [f"{lab} ({run})" for lab, run in registry]
+
+
+def _parse_run_option(opt: Optional[str]) -> Optional[Tuple[str, str]]:
+    if not opt:
+        return None
+    lab, run = opt.split(" (", 1)
+    return lab.strip(), run.rstrip(")").strip()
+
+
 def _show_fig(fig: plt.Figure, width: int = 700) -> None:
     show_figure_in_streamlit(fig, width)
+
+
+_PERSON_PREFIX_RE = re.compile(r"^([A-Za-z]+)")
+
+
+def _person_prefix(path: str) -> str:
+    stem = Path(path).stem
+    m = _PERSON_PREFIX_RE.match(stem)
+    return m.group(1) if m else stem
+
+
+def _fold_dataset_dirs(root: Path) -> List[str]:
+    names = []
+    for p in sorted(root.iterdir()) if root.is_dir() else []:
+        if not p.is_dir() or not p.name.startswith("fold_datasets"):
+            continue
+        if any(p.glob("fold_*.json")):
+            names.append(p.name)
+    return names
+
+
+def _load_split_distribution_rows(fold_dir: Path) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    if not fold_dir.is_dir():
+        return rows
+    for fold_json in sorted(fold_dir.glob("fold_*.json")):
+        try:
+            fold_id = int(fold_json.stem.split("_", 1)[1])
+        except (IndexError, ValueError):
+            continue
+        with open(fold_json, encoding="utf-8") as f:
+            data = json.load(f)
+        for split, payload in data.items():
+            if split == "meta" or not isinstance(payload, dict):
+                continue
+            files = payload.get("files") or []
+            labels = payload.get("labels") or []
+            for file_path, label in zip(files, labels):
+                prefix = _person_prefix(str(file_path))
+                class_name = CLASS_NAMES[int(float(label))]
+                rows.append(
+                    {
+                        "fold": fold_id,
+                        "split": split,
+                        "class": class_name,
+                        "label": int(float(label)),
+                        "prefix": prefix,
+                        "person": prefix.lower(),
+                        "file": str(file_path),
+                    }
+                )
+    return rows
+
+
+def _annotate_drowsy_ratios(
+    ax,
+    x_positions,
+    not_drowsy_vals,
+    drowsy_vals,
+    *,
+    rotation: int = 90,
+    fontsize: int = 7,
+) -> None:
+    totals = np.asarray(not_drowsy_vals, dtype=float) + np.asarray(drowsy_vals, dtype=float)
+    drowsy = np.asarray(drowsy_vals, dtype=float)
+    ymax = float(np.max(totals)) if len(totals) else 0.0
+    pad = ymax * 0.025 if ymax else 0.5
+    for x, total, d_count in zip(x_positions, totals, drowsy):
+        if total <= 0:
+            continue
+        ratio = 100.0 * d_count / total
+        ax.text(
+            x,
+            total + pad,
+            f"{ratio:.0f}",
+            ha="center",
+            va="bottom",
+            rotation=rotation,
+            fontsize=fontsize,
+            color="#333333",
+        )
+
+
+def _plot_split_class_totals(df: DataFrame) -> plt.Figure:
+    pdf = require_pandas()
+    counts = (
+        df.groupby(["fold", "split", "class"])
+        .size()
+        .reset_index(name="n")
+        .sort_values(["fold", "split", "class"])
+    )
+    labels = [f"F{int(r.fold)} {r.split}" for r in counts[["fold", "split"]].drop_duplicates().itertuples()]
+    pivot = counts.pivot_table(
+        index=["fold", "split"], columns="class", values="n", aggfunc="sum", fill_value=0
+    )
+    pivot = pivot.reindex(columns=list(CLASS_NAMES), fill_value=0)
+    x = np.arange(len(pivot))
+    fig, ax = plt.subplots(figsize=(max(8, len(pivot) * 0.55), 4.2))
+    bottom = np.zeros(len(pivot))
+    colors = {"NotDrowsy": "#4C78A8", "Drowsy": "#F58518"}
+    for cls in pivot.columns:
+        vals = pivot[cls].to_numpy()
+        ax.bar(x, vals, bottom=bottom, label=cls, color=colors.get(cls))
+        bottom += vals
+    _annotate_drowsy_ratios(
+        ax,
+        x,
+        pivot["NotDrowsy"].to_numpy(),
+        pivot["Drowsy"].to_numpy(),
+    )
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+    ax.set_ylabel("Images")
+    ax.set_ylim(0, float(np.max(bottom)) * 1.16 if len(bottom) else 1)
+    ax.set_title("Images by fold, split, and class")
+    ax.legend()
+    ax.grid(axis="y", alpha=0.25)
+    fig.tight_layout()
+    return fig
+
+
+def _plot_top_people(df: DataFrame, top_n: int) -> plt.Figure:
+    person_counts = (
+        df.groupby(["person", "class"])
+        .size()
+        .reset_index(name="n")
+        .sort_values("n", ascending=False)
+    )
+    totals = person_counts.groupby("person")["n"].sum().sort_values(ascending=False)
+    keep = totals.head(top_n).index
+    pivot = person_counts[person_counts["person"].isin(keep)].pivot_table(
+        index="person", columns="class", values="n", aggfunc="sum", fill_value=0
+    )
+    pivot = pivot.loc[keep].reindex(columns=list(CLASS_NAMES), fill_value=0)
+    fig, ax = plt.subplots(figsize=(max(7, top_n * 0.35), 4.2))
+    bottom = np.zeros(len(pivot))
+    colors = {"NotDrowsy": "#4C78A8", "Drowsy": "#F58518"}
+    for cls in pivot.columns:
+        vals = pivot[cls].to_numpy()
+        ax.bar(pivot.index, vals, bottom=bottom, label=cls, color=colors.get(cls))
+        bottom += vals
+    _annotate_drowsy_ratios(
+        ax,
+        np.arange(len(pivot)),
+        pivot["NotDrowsy"].to_numpy(),
+        pivot["Drowsy"].to_numpy(),
+    )
+    ax.set_ylabel("Images")
+    ax.set_ylim(0, float(np.max(bottom)) * 1.16 if len(bottom) else 1)
+    ax.set_title(f"Top {top_n} normalized people by image count")
+    ax.legend()
+    ax.grid(axis="y", alpha=0.25)
+    ax.tick_params(axis="x", rotation=45)
+    fig.tight_layout()
+    return fig
+
+
+def _plot_people_by_fold(df: DataFrame, top_n: int) -> plt.Figure:
+    person_totals = df.groupby("person").size().sort_values(ascending=False)
+    keep = list(person_totals.head(top_n).index)
+    folds = sorted(int(x) for x in df["fold"].unique())
+    colors = {"NotDrowsy": "#4C78A8", "Drowsy": "#F58518"}
+    fig_h = max(3.2, 2.35 * len(folds))
+    fig_w = max(9, top_n * 0.34)
+    fig, axes = plt.subplots(len(folds), 1, figsize=(fig_w, fig_h), sharex=True)
+    if len(folds) == 1:
+        axes = [axes]
+
+    max_total = 0
+    pivots = []
+    for fold in folds:
+        sub = df[(df["fold"] == fold) & (df["person"].isin(keep))]
+        pivot = sub.pivot_table(
+            index="person", columns="class", values="file", aggfunc="count", fill_value=0
+        )
+        pivot = pivot.reindex(index=keep, columns=list(CLASS_NAMES), fill_value=0)
+        pivots.append(pivot)
+        if len(pivot):
+            max_total = max(max_total, int(pivot.sum(axis=1).max()))
+
+    for ax, fold, pivot in zip(axes, folds, pivots):
+        bottom = np.zeros(len(pivot))
+        for cls in pivot.columns:
+            vals = pivot[cls].to_numpy()
+            ax.bar(pivot.index, vals, bottom=bottom, label=cls, color=colors.get(cls))
+            bottom += vals
+        _annotate_drowsy_ratios(
+            ax,
+            np.arange(len(pivot)),
+            pivot["NotDrowsy"].to_numpy(),
+            pivot["Drowsy"].to_numpy(),
+            fontsize=6,
+        )
+        ax.set_ylabel(f"F{fold}\nImages")
+        ax.set_ylim(0, max_total * 1.18 if max_total else 1)
+        ax.grid(axis="y", alpha=0.25)
+        ax.tick_params(axis="x", rotation=45)
+        if fold == folds[0]:
+            ax.set_title(f"Top {top_n} normalized people by fold")
+            ax.legend(fontsize=8, loc="upper right")
+
+    fig.tight_layout()
+    return fig
+
+
+def _train_pool_splits(split_names: List[str]) -> List[str]:
+    if {"train_fit", "val_monitor"}.issubset(set(split_names)):
+        return ["train_fit", "val_monitor"]
+    if {"train", "val"}.issubset(set(split_names)):
+        return ["train", "val"]
+    return [s for s in split_names if s != "test"][:2]
+
+
+def _plot_train_pool_by_person_fold(
+    df: DataFrame,
+    top_n: int,
+    train_pool_splits: List[str],
+) -> Optional[plt.Figure]:
+    from matplotlib.patches import Patch
+
+    if len(train_pool_splits) < 2:
+        return None
+
+    pool_df = df[df["split"].isin(train_pool_splits)]
+    if pool_df.empty:
+        return None
+
+    person_totals = pool_df.groupby("person").size().sort_values(ascending=False)
+    keep = list(person_totals.head(top_n).index)
+    folds = sorted(int(x) for x in pool_df["fold"].unique())
+    fig_h = max(3.4, 2.55 * len(folds))
+    fig_w = max(10, top_n * 0.46)
+    fig, axes = plt.subplots(len(folds), 1, figsize=(fig_w, fig_h), sharex=True)
+    if len(folds) == 1:
+        axes = [axes]
+
+    split_offsets = {
+        train_pool_splits[0]: -0.19,
+        train_pool_splits[1]: 0.19,
+    }
+    class_colors = {"NotDrowsy": "#4C78A8", "Drowsy": "#F58518"}
+    bar_w = 0.34
+
+    max_total = 0
+    fold_tables = []
+    for fold in folds:
+        sub = pool_df[(pool_df["fold"] == fold) & (pool_df["person"].isin(keep))]
+        table = sub.pivot_table(
+            index="person",
+            columns=["class", "split"],
+            values="file",
+            aggfunc="count",
+            fill_value=0,
+        )
+        for cls in CLASS_NAMES:
+            for split in train_pool_splits:
+                if (cls, split) not in table.columns:
+                    table[(cls, split)] = 0
+        table = table.reindex(index=keep, fill_value=0)
+        fold_tables.append(table)
+        for split in train_pool_splits:
+            split_total = sum(table[(cls, split)] for cls in CLASS_NAMES)
+            if len(split_total):
+                max_total = max(max_total, int(split_total.max()))
+
+    x_base = np.arange(len(keep))
+    for ax, fold, table in zip(axes, folds, fold_tables):
+        for split in train_pool_splits:
+            x = x_base + split_offsets[split]
+            bottom = np.zeros(len(table))
+            for cls in CLASS_NAMES:
+                vals = table[(cls, split)].to_numpy()
+                ax.bar(
+                    x,
+                    vals,
+                    width=bar_w,
+                    bottom=bottom,
+                    color=class_colors[cls],
+                    alpha=1.0 if split == train_pool_splits[0] else 0.62,
+                )
+                bottom += vals
+            _annotate_drowsy_ratios(
+                ax,
+                x,
+                table[("NotDrowsy", split)].to_numpy(),
+                table[("Drowsy", split)].to_numpy(),
+                fontsize=6,
+            )
+        ax.set_ylabel(f"F{fold}\nImages")
+        ax.set_ylim(0, max_total * 1.2 if max_total else 1)
+        ax.grid(axis="y", alpha=0.25)
+        if fold == folds[0]:
+            ax.set_title(
+                f"Train pool by person and split ({' + '.join(train_pool_splits)}), stacked by class"
+            )
+            handles = [
+                Patch(facecolor=class_colors["NotDrowsy"], label="NotDrowsy"),
+                Patch(facecolor=class_colors["Drowsy"], label="Drowsy"),
+                Patch(facecolor="#666666", alpha=1.0, label=train_pool_splits[0]),
+                Patch(facecolor="#666666", alpha=0.62, label=train_pool_splits[1]),
+            ]
+            ax.legend(handles=handles, fontsize=8, ncol=4, loc="upper right")
+
+    axes[-1].set_xticks(x_base)
+    axes[-1].set_xticklabels(keep, rotation=45, ha="right", fontsize=8)
+    fig.tight_layout()
+    return fig
+
+
+def _split_overlap_table(df: DataFrame) -> DataFrame:
+    pdf = require_pandas()
+    rows = []
+    for (fold, person), g in df.groupby(["fold", "person"]):
+        split_counts = g.groupby("split").size().to_dict()
+        class_counts = g.groupby("class").size().to_dict()
+        splits = sorted(split_counts)
+        has_cross_split = len(splits) > 1
+        has_both_classes = all(cls in class_counts for cls in CLASS_NAMES)
+        rows.append(
+            {
+                "fold": int(fold),
+                "person": person,
+                "splits": ", ".join(splits),
+                "classes": ", ".join(sorted(class_counts)),
+                "has_cross_split": has_cross_split,
+                "has_both_classes": has_both_classes,
+                "n_total": int(len(g)),
+                **{f"{split}_n": int(split_counts.get(split, 0)) for split in sorted(df["split"].unique())},
+                **{f"{cls}_n": int(class_counts.get(cls, 0)) for cls in CLASS_NAMES},
+            }
+        )
+    return pdf.DataFrame(rows).sort_values(["has_cross_split", "has_both_classes", "n_total"], ascending=[False, False, False])
+
+
+def _plot_overlap_counts(overlap_df: DataFrame) -> plt.Figure:
+    summary = (
+        overlap_df.groupby("fold")[["has_cross_split", "has_both_classes"]]
+        .sum()
+        .astype(int)
+    )
+    fig, ax = plt.subplots(figsize=(7, 3.8))
+    x = np.arange(len(summary))
+    width = 0.36
+    ax.bar(x - width / 2, summary["has_cross_split"], width, label="same person in >1 split", color="#54A24B")
+    ax.bar(x + width / 2, summary["has_both_classes"], width, label="same person has both classes", color="#E45756")
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"F{int(f)}" for f in summary.index])
+    ax.set_ylabel("Normalized people")
+    ax.set_title("Person overlap signals by fold")
+    ax.legend(fontsize=8)
+    ax.grid(axis="y", alpha=0.25)
+    fig.tight_layout()
+    return fig
+
+
+def _person_matrix(df: DataFrame, person: str) -> DataFrame:
+    pdf = require_pandas()
+    sub = df[df["person"] == person]
+    if sub.empty:
+        return pdf.DataFrame()
+    mat = (
+        sub.groupby(["fold", "split", "class"])
+        .size()
+        .reset_index(name="n")
+        .pivot_table(index=["fold", "split"], columns="class", values="n", fill_value=0)
+        .reindex(columns=list(CLASS_NAMES), fill_value=0)
+    )
+    mat["total"] = mat.sum(axis=1)
+    return mat.reset_index()
+
+
+def _tab_dataset_splits(root: Path, fold_ds: Path) -> None:
+    st.subheader("Dataset split distribution")
+    st.caption("Inspect fold JSONs by class, split, and normalized person id. Normalized person id lowercases filename prefixes, so A/a and ZA/za are treated as the same person.")
+
+    available = _fold_dataset_dirs(root)
+    default_name = fold_ds.name if fold_ds.name in available else (available[0] if available else str(fold_ds))
+    options = available or [str(fold_ds)]
+    pick = st.selectbox("Fold JSON directory", options, index=options.index(default_name) if default_name in options else 0)
+    selected_dir = Path(pick)
+    if not selected_dir.is_absolute():
+        selected_dir = root / selected_dir
+
+    rows = _load_split_distribution_rows(selected_dir)
+    if not rows:
+        st.warning(f"No fold_*.json files found in `{selected_dir}`.")
+        return
+
+    df = rows_to_dataframe(rows)
+    split_names = sorted(df["split"].unique())
+    folds = sorted(int(x) for x in df["fold"].unique())
+    people = sorted(df["person"].unique())
+    both_class_people = sorted(
+        p for p, g in df.groupby("person") if set(g["class"]) == set(CLASS_NAMES)
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Images", f"{len(df):,}")
+    c2.metric("Folds", len(folds))
+    c3.metric("Splits", len(split_names))
+    c4.metric("Normalized people", len(people))
+    st.caption(f"People with both Drowsy and NotDrowsy variants: {len(both_class_people)}")
+
+    fig = _plot_split_class_totals(df)
+    _show_fig(fig, width=950)
+
+    top_n = int(
+        st.slider(
+            "Top people count",
+            min_value=1,
+            max_value=max(1, len(people)),
+            value=max(1, len(people)),
+            key="ds_top_people",
+        )
+    )
+    _show_fig(_plot_top_people(df, top_n), width=950)
+    _show_fig(_plot_people_by_fold(df, top_n), width=950)
+    train_pool_splits = _train_pool_splits(split_names)
+    train_pool_fig = _plot_train_pool_by_person_fold(df, top_n, train_pool_splits)
+    if train_pool_fig is not None:
+        _show_fig(train_pool_fig, width=950)
+    else:
+        st.info("No train-pool split pair found for a train_fit / val_monitor distribution plot.")
+
+    overlap = _split_overlap_table(df)
+    _show_fig(_plot_overlap_counts(overlap), width=950)
+    leak_rows = overlap[(overlap["has_cross_split"]) & (overlap["has_both_classes"])]
+    st.metric("Person-folds with both class + cross-split", len(leak_rows))
+
+    st.markdown("#### Person overlap table")
+    only_risky = st.checkbox("Show only people with both classes and cross-split presence", value=True)
+    shown = leak_rows if only_risky else overlap
+    st_dataframe(shown.head(250), use_container_width=True, height=360)
+
+    st.markdown("#### Inspect one normalized person")
+    default_person = both_class_people[0] if both_class_people else people[0]
+    person = st.selectbox(
+        "Person id",
+        people,
+        index=people.index(default_person) if default_person in people else 0,
+        key="ds_person",
+    )
+    st_dataframe(_person_matrix(df, person), use_container_width=True, height=260)
+
+    with st.expander("Raw grouped counts"):
+        grouped = (
+            df.groupby(["fold", "split", "person", "prefix", "class"])
+            .size()
+            .reset_index(name="n")
+            .sort_values(["fold", "person", "split", "class"])
+        )
+        st_dataframe(grouped, use_container_width=True, height=420)
 
 
 @st.cache_resource(max_entries=12)
@@ -283,8 +750,8 @@ def _cached_fold_summaries(project_root_str: str, run_name: str) -> List[Dict[st
     return collect_fold_run_summaries(Path(project_root_str), run_name)
 
 
-@st.cache_data(show_spinner="Val inference (may take a few minutes)…")
-def _cached_val_decisions(
+@st.cache_data(show_spinner="Test inference (may take a few minutes)…")
+def _cached_test_decisions(
     project_root_str: str,
     fold_id: int,
     fold_ds_str: str,
@@ -296,19 +763,20 @@ def _cached_val_decisions(
     img_h: int,
     img_w: int,
 ) -> List[Dict[str, Any]]:
-    from src.fold_functions import load_fold_manifest
+    from src.fold_functions import load_fold_manifest, resolve_eval_split
 
     root = Path(project_root_str)
     registry_runs: List[str] = json.loads(registry_runs_json)
     data = load_fold_manifest(fold_id - 1, fold_ds_str)
-    val_paths = list(data["val"]["files"])
-    val_labels = list(data["val"]["labels"])
+    eval_paths, eval_labels, _ = resolve_eval_split(data)
+    eval_paths = list(eval_paths)
+    eval_labels = list(eval_labels)
 
-    if max_samples > 0 and len(val_paths) > max_samples:
+    if max_samples > 0 and len(eval_paths) > max_samples:
         rng = np.random.default_rng(42 + fold_id)
-        idx = rng.choice(len(val_paths), size=max_samples, replace=False)
-        val_paths = [val_paths[i] for i in sorted(idx)]
-        val_labels = [val_labels[i] for i in sorted(idx)]
+        idx = rng.choice(len(eval_paths), size=max_samples, replace=False)
+        eval_paths = [eval_paths[i] for i in sorted(idx)]
+        eval_labels = [eval_labels[i] for i in sorted(idx)]
 
     specs: Dict[str, str] = {}
     for run in registry_runs:
@@ -324,8 +792,8 @@ def _cached_val_decisions(
             weights_map = load_weights_map(wjson)
 
     return build_val_decision_rows(
-        val_paths=val_paths,
-        val_labels=val_labels,
+        val_paths=eval_paths,
+        val_labels=eval_labels,
         model_specs=specs,
         dataset_dir=Path(dataset_dir_str),
         weights_map=weights_map,
@@ -550,6 +1018,9 @@ def _tab_model_comparison_artifacts(root: Path) -> None:
 
 def _tab_training(root: Path, registry: List[Tuple[str, str]]) -> None:
     st.subheader("Training history comparison")
+    if not registry:
+        st.info("Select runs in the sidebar to compare training history.")
+        return
     fold_id = int(st.number_input("Fold", 1, 20, 1, key="tr_fold"))
     metric = st.selectbox(
         "Metric to overlay",
@@ -579,9 +1050,11 @@ def _tab_training(root: Path, registry: List[Tuple[str, str]]) -> None:
 
     st.markdown("---")
     st.caption("Side-by-side panels (full history + extra metrics)")
-    col_run = st.selectbox("Single-run detail", [f"{l} ({r})" for l, r in registry], key="tr_detail_run")
-    lab, run = col_run.split(" (", 1)
-    run = run.rstrip(")")
+    col_run = st.selectbox("Single-run detail", _run_option_labels(registry), key="tr_detail_run")
+    parsed = _parse_run_option(col_run)
+    if parsed is None:
+        return
+    lab, run = parsed
     hist = load_metrics_csv(fold_run_dir(root, run, fold_id) / "training_metrics.csv")
     c1, c2 = st.columns(2)
     with c1:
@@ -594,8 +1067,11 @@ def _tab_training(root: Path, registry: List[Tuple[str, str]]) -> None:
             _show_fig(fig2, 420)
 
 
-def _tab_val_reports(root: Path, registry: List[Tuple[str, str]]) -> None:
-    st.subheader("Validation reports & confusion matrices")
+def _tab_test_reports(root: Path, registry: List[Tuple[str, str]]) -> None:
+    st.subheader("Test reports & confusion matrices")
+    if not registry:
+        st.info("Select runs in the sidebar to view test reports.")
+        return
     fold_id = int(st.number_input("Fold", 1, 20, 1, key="vr_fold"))
     picks = st.multiselect(
         "Runs",
@@ -610,8 +1086,8 @@ def _tab_val_reports(root: Path, registry: List[Tuple[str, str]]) -> None:
         fold_dir = fold_run_dir(root, run, fold_id)
         with col:
             st.markdown(f"**{lab}**")
-            report_path = fold_dir / "plots" / "val_evaluation_report.txt"
-            if report_path.is_file():
+            report_path = eval_report_path(fold_dir)
+            if report_path is not None:
                 text = report_path.read_text(encoding="utf-8")
                 parsed = parse_evaluation_report(text)
                 st.text_area(
@@ -625,16 +1101,11 @@ def _tab_val_reports(root: Path, registry: List[Tuple[str, str]]) -> None:
                 if parsed.get("roc_auc") is not None:
                     st.metric("ROC-AUC", f"{parsed['roc_auc']:.4f}")
             else:
-                st.warning("No val_evaluation_report.txt")
+                st.warning("No test_evaluation_report.txt (or legacy val report)")
 
-            for png_name, caption in (
-                ("val_confusion_matrix.png", "Confusion matrix"),
-                ("confusion_matrix.png", "Confusion matrix"),
-                ("val_roc_curve.png", "ROC"),
-                ("val_precision_recall_curve.png", "PR curve"),
-                ("training_history.png", "Training history"),
-            ):
-                png = fold_dir / "plots" / png_name
+            plots_dir = fold_dir / "plots"
+            for png_name, caption in EVAL_PLOT_CANDIDATES:
+                png = plots_dir / png_name
                 if png.is_file():
                     st_image(str(png), caption=caption, use_container_width=True)
                     break
@@ -783,7 +1254,7 @@ def _tab_gradcam_and_mask(
     registry: List[Tuple[str, str]],
     default_fold_id: int,
 ) -> None:
-    from src.fold_functions import load_fold_manifest
+    from src.fold_functions import load_fold_manifest, resolve_eval_split
 
     sub_gc, sub_mask = st.tabs(["GradCAM (same image)", "ROI mask preview"])
 
@@ -792,17 +1263,18 @@ def _tab_gradcam_and_mask(
         fold_id = int(st.number_input("Fold", 1, 20, default_fold_id, key="gc_fold"))
         display_w = int(st.slider("Panel width (px)", 120, 500, 240, key="gc_w"))
         data = load_fold_manifest(fold_id - 1, str(fold_ds))
-        val_paths = [str(Path(p)) for p in data["val"]["files"]]
-        if not val_paths:
-            st.warning("No validation images in fold manifest.")
+        test_paths, _, _ = resolve_eval_split(data)
+        test_paths = [str(Path(p)) for p in test_paths]
+        if not test_paths:
+            st.warning("No test images in fold manifest.")
             return
         labels_display = [
             short_image_label(os.path.relpath(p, str(dataset_dir)).replace("\\", "/"))
-            for p in val_paths
+            for p in test_paths
         ]
         idx = st.selectbox(
-            "Validation image",
-            range(len(val_paths)),
+            "Test image",
+            range(len(test_paths)),
             format_func=lambda i: labels_display[i],
             key="gc_img",
         )
@@ -812,7 +1284,7 @@ def _tab_gradcam_and_mask(
                 root=root,
                 registry=registry,
                 fold_id=fold_id,
-                image_path=val_paths[idx],
+                image_path=test_paths[idx],
                 img_size=img_size,
                 model_runs=picks,
                 display_w=display_w,
@@ -820,23 +1292,24 @@ def _tab_gradcam_and_mask(
 
     with sub_mask:
         st.subheader("Landmark ROI mask on image")
-        fold_id = int(st.number_input("Fold (val list)", 1, 20, default_fold_id, key="mk_fold"))
+        fold_id = int(st.number_input("Fold (test list)", 1, 20, default_fold_id, key="mk_fold"))
         mask_w = int(st.slider("Display width (px)", 120, 400, 220, key="mk_w"))
         data = load_fold_manifest(fold_id - 1, str(fold_ds))
-        val_paths = list(data["val"]["files"])
-        if not val_paths:
+        test_paths, _, _ = resolve_eval_split(data)
+        test_paths = list(test_paths)
+        if not test_paths:
             return
         labels_display = [
             short_image_label(os.path.relpath(str(Path(p)), str(dataset_dir)).replace("\\", "/"))
-            for p in val_paths
+            for p in test_paths
         ]
         idx = st.selectbox(
             "Image",
-            range(len(val_paths)),
+            range(len(test_paths)),
             format_func=lambda i: labels_display[i],
             key="mk_img",
         )
-        image_uint8 = load_image_uint8(str(val_paths[idx]), img_size)
+        image_uint8 = load_image_uint8(str(test_paths[idx]), img_size)
         roi_half = int(st.slider("Landmark box half-size", 4, 40, 12, key="mk_roi"))
         bg_val = float(st.slider("Background mask value", 0.0, 1.0, 0.0, 0.05, key="mk_bg"))
         mask = create_landmark_mask(
@@ -875,7 +1348,7 @@ def _tab_focus_mask(
         "Uses **one** trained model (your choice). The mask background only changes how "
         "**focus ratio** is measured on the same GradCAM heatmap; it does **not** change the model prediction."
     )
-    from src.fold_functions import load_fold_manifest
+    from src.fold_functions import load_fold_manifest, resolve_eval_split
 
     fold_id = int(st.number_input("Fold", 1, 20, 1, key="fc_fold"))
     run_opt = st.selectbox("Trained model (for GradCAM + P(drowsy))", [f"{l} ({r})" for l, r in registry], key="fc_run")
@@ -887,8 +1360,9 @@ def _tab_focus_mask(
         return
 
     data = load_fold_manifest(fold_id - 1, str(fold_ds))
-    paths = list(data["val"]["files"])
-    n_sample = int(st.slider("Sample size (val)", 10, min(500, len(paths)), 80, key="fc_n"))
+    paths, _, _ = resolve_eval_split(data)
+    paths = list(paths)
+    n_sample = int(st.slider("Sample size (test)", 10, min(500, len(paths)), 80, key="fc_n"))
     rng = np.random.default_rng(42)
     if len(paths) > n_sample:
         paths = [paths[i] for i in sorted(rng.choice(len(paths), n_sample, replace=False))]
@@ -1032,11 +1506,14 @@ def _tab_decisions(
     registry: List[Tuple[str, str]],
     img_size: Tuple[int, int],
 ) -> None:
-    st.subheader("Validation decisions & GradCAM")
+    st.subheader("Test decisions & GradCAM")
     st.caption(
         "**Decision changed** = predicted class differs from baseline. "
         "**Accuracy vs baseline** = improved / same / worsened relative to ground truth."
     )
+    if not registry:
+        st.info("Select runs in the sidebar first.")
+        return
 
     fold_id = int(st.number_input("Fold", 1, 20, 1, key="dc_fold"))
     baseline_opt = st.selectbox("Baseline run", [f"{l} ({r})" for l, r in registry], key="dc_base")
@@ -1048,12 +1525,12 @@ def _tab_decisions(
         key="dc_cmp",
     )
     compare_runs = [o.split(" (", 1)[1].rstrip(")") for o in compare_opts]
-    max_samples = int(st.slider("Max val samples (0 = all)", 0, 8358, 1500, 100, key="dc_max"))
+    max_samples = int(st.slider("Max test samples (0 = all)", 0, 8358, 1500, 100, key="dc_max"))
     batch_size = int(st.selectbox("Batch size", [16, 32, 64], index=1, key="dc_bs"))
 
-    if st.button("Run val inference", type="primary", key="dc_go"):
+    if st.button("Run test inference", type="primary", key="dc_go"):
         all_runs = [r for _, r in registry]
-        rows = _cached_val_decisions(
+        rows = _cached_test_decisions(
             str(root),
             fold_id,
             str(fold_ds),
@@ -1764,7 +2241,7 @@ def _tab_guide(root: Path) -> None:
 2. Streamlit **reruns the whole script** from top to bottom (`main()` → tabs).
 3. **Sidebar** reads paths and builds the **run registry** (label → folder under `runs/`).
 4. Each **tab** calls a `_tab_*` function; heavy work runs only when you click a button.
-5. **`@st.cache_data`** functions (e.g. val inference) reuse results until inputs change.
+5. **`@st.cache_data`** functions (e.g. test inference) reuse results until inputs change.
 6. **`st.session_state`** keeps inference tables between reruns so tabs do not recompute every time.
         """
     )
@@ -1774,7 +2251,7 @@ def _tab_guide(root: Path) -> None:
 | File | Role |
 |------|------|
 | `streamlit_ui/analysis_app.py` | UI, tabs, buttons, plots |
-| `streamlit_ui/analysis_core.py` | Load runs, weights, val inference, focus comparison |
+| `streamlit_ui/analysis_core.py` | Load runs, weights, test inference, focus comparison |
 | `streamlit_ui/helpers.py` | Plots, image helpers, Streamlit version shims |
 | `scripts/auto_optimize_gradcam_weights.py` | Focus ratios + weight formulas |
         """
@@ -1939,9 +2416,10 @@ def main() -> None:
         [
             "Guide",
             "Overview",
+            "Dataset splits",
             "GradCAM & mask",
             "Training",
-            "Val reports & CM",
+            "Test reports & CM",
             "Weights",
             "Focus & mask BG",
             "Decisions",
@@ -1956,25 +2434,27 @@ def main() -> None:
     with tabs[1]:
         _tab_overview(root, registry)
     with tabs[2]:
+        _tab_dataset_splits(root, fold_ds)
+    with tabs[3]:
         _tab_gradcam_and_mask(
             root, fold_ds, dataset_dir, (img_h, img_w), registry,
             default_fold_id=int(st.session_state.get("default_fold_id", 1)),
         )
-    with tabs[3]:
-        _tab_training(root, registry)
     with tabs[4]:
-        _tab_val_reports(root, registry)
+        _tab_training(root, registry)
     with tabs[5]:
-        _tab_weights(root, fold_ds, dataset_dir, registry, (img_h, img_w))
+        _tab_test_reports(root, registry)
     with tabs[6]:
-        _tab_focus_mask(root, fold_ds, dataset_dir, (img_h, img_w), registry)
+        _tab_weights(root, fold_ds, dataset_dir, registry, (img_h, img_w))
     with tabs[7]:
-        _tab_decisions(root, fold_ds, dataset_dir, registry, (img_h, img_w))
+        _tab_focus_mask(root, fold_ds, dataset_dir, (img_h, img_w), registry)
     with tabs[8]:
-        _tab_overlap_artifacts(root)
+        _tab_decisions(root, fold_ds, dataset_dir, registry, (img_h, img_w))
     with tabs[9]:
-        _tab_model_comparison_artifacts(root)
+        _tab_overlap_artifacts(root)
     with tabs[10]:
+        _tab_model_comparison_artifacts(root)
+    with tabs[11]:
         _tab_experiments(root)
 
 

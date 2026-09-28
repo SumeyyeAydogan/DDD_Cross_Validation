@@ -13,6 +13,7 @@ from src.model           import build_model
 from src.train           import train_model
 from src.utils           import plot_history, plot_metrics, plot_dataset_distribution
 from src.evaluate        import evaluate_model
+from src.threshold       import fit_threshold_for_fold, save_threshold
 from src.gradcam_analysis import analyze_tf_keras_gradcam
 from src.run_manager     import RunManager
 from src.callbacks       import get_training_callbacks, get_time_history, summarize_epoch_times
@@ -43,9 +44,9 @@ if __name__ == "__main__":
 
     # 2) Folder where split data will go
     class_names = ("NotDrowsy", "Drowsy")
-    output_dir = os.path.join(project_root, "fold_datasets")
+    output_dir = os.path.join(project_root, "fold_datasets_v2")
     os.makedirs(output_dir, exist_ok=True)
-    #save_fold_datasets(raw_dir, 5, (224, 224), 42, class_names, output_dir)
+    #save_fold_datasets(raw_dir, 5, (224, 224), 42, class_names, output_dir, val_ratio=0.15, split_method="stratified_round_robin")
     
     # 4) EXPERIMENT CONFIGURATION
     # ============================================================
@@ -192,15 +193,24 @@ if __name__ == "__main__":
     metrics_plot_path = os.path.join(run_manager.run_dir, "plots", "training_metrics.png")
     plot_metrics(history, save_path=metrics_plot_path)
 
-    # 10) Evaluate on validation set
-    print("?? Evaluating model on validation set...")
+    # 10) Threshold on train_fit, evaluate on test
+    th_path = os.path.join(run_manager.run_dir, "threshold.json")
+    threshold, th_source = fit_threshold_for_fold(
+        model, fold_idx, (224, 224), batch_size, 42, output_dir
+    )
+    save_threshold(th_path, threshold, source=th_source)
+    print(f"Threshold ({th_source}, balanced_accuracy): {threshold:.4f}")
+
+    print("?? Evaluating model on test set...")
     evaluate_model(
         model,
         test_ds,
         plots_dir=os.path.join(run_manager.run_dir, "plots"),
+        class_names=list(class_names),
         ds_name="test",
+        threshold=threshold,
     )
-    print("? Validation evaluation completed!")
+    print("? Test evaluation completed!")
 
     # 11) Save final model
     print("?? Saving final model...")
