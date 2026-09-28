@@ -17,7 +17,8 @@ from src.fold_functions import save_fold_datasets, create_tf_datasets_for_fold
 from src.model import build_model
 from src.train import train_model
 from src.evaluate import evaluate_model
-from src.threshold import fit_threshold_for_fold, save_threshold
+from src.evaluation.threshold import fit_threshold_on_dataset, save_threshold
+from src.visualization.threshold_plots import plot_threshold_results
 from src.utils import plot_history, plot_metrics, save_cv_summary, metrics_at_best_val_auc
 from src.callbacks import get_training_callbacks, get_time_history, summarize_epoch_times
 
@@ -32,15 +33,15 @@ def _set_global_determinism(seed: int) -> None:
 project_root = os.path.dirname(os.path.abspath(__file__))
 dataset_dir = os.path.join(project_root, "dataset")
 # Output: runs/<run_name>/fold_<k>/... (match scripts/model_comparison_integral.py and overlap_accuracy_comparison.py)
-run_manager = RunManager(run_name="baseline")
-output_dir = os.path.join(project_root, "fold_datasets_v3")
+run_manager = RunManager(run_name="exp_inside_density_random_split")
+output_dir = os.path.join(project_root, "fold_datasets_v4")
 inner_val_ratio = 0.15
 # per_subject_round_robin | stratified_round_robin | random_outer_fold_inner_val
-split_method = "stratified_round_robin"
+split_method = "random_outer_fold_inner_val"
 # Reward / GradCAM sample weights: directory that contains fold_1_weights.json … fold_K_weights.json
 # (one file per fold; keys are paths relative to dataset_dir). None → default <project>/weights
 REWARD_WEIGHTS_DIR = None  # e.g. os.path.join(project_root, "weights", "my_reward_run")
-weights_dir = REWARD_WEIGHTS_DIR if REWARD_WEIGHTS_DIR else os.path.join(project_root, "weights")
+weights_dir = REWARD_WEIGHTS_DIR if REWARD_WEIGHTS_DIR else os.path.join(project_root, "weights_inside_density")
 os.makedirs(output_dir, exist_ok=True)
 
 # 1) Save initial config
@@ -69,16 +70,16 @@ gpus = tf.config.list_physical_devices("GPU")
 print("GPUs:", gpus)
 
 # 3) Save fold datasets (run once, then comment out)
-save_fold_datasets(
-    config["dataset_dir"],
-    config["k"],
-    config["img_size"],
-    config["seed"],
-    config["class_names"],
-    config["output_dir"],
-    val_ratio=config["inner_val_ratio"],
-    split_method=config["split_method"],
-)
+# save_fold_datasets(
+#     config["dataset_dir"],
+#     config["k"],
+#     config["img_size"],
+#     config["seed"],
+#     config["class_names"],
+#     config["output_dir"],
+#     val_ratio=config["inner_val_ratio"],
+#     split_method=config["split_method"],
+# )
 
 val_acc_per_fold: List[float] = []
 val_auc_per_fold: List[float] = []
@@ -95,7 +96,7 @@ for fold_idx in range(config["k"]):
     fold_run_manager = RunManager(run_name=os.path.join(run_manager.run_name, f"fold_{fold_idx+1}"))
 
     # 4.1) Create datasets for fold (optional: weights/fold_{k}_weights.json from compute_fold_weights.py)
-    sw_name = f"fold_{fold_idx + 1}_weights.json"
+    sw_name = f"fold_{fold_idx + 1}_exp_weights.json"
     sw_path = os.path.join(weights_dir, sw_name)
     use_sw = sw_path if os.path.isfile(sw_path) else None
     if use_sw:
@@ -160,12 +161,13 @@ for fold_idx in range(config["k"]):
 
     # 4.5) Threshold on train_fit, evaluate on test
     th_path = os.path.join(fold_run_manager.run_dir, "threshold.json")
-    threshold, th_source = fit_threshold_for_fold(
-        model, fold_idx, config["img_size"], config["batch_size"], config["seed"], config["output_dir"]
+    threshold, ttc = fit_threshold_on_dataset(
+        model, val_monitor_ds, scoring="balanced_accuracy"
     )
-    save_threshold(th_path, threshold, source=th_source)
+    save_threshold(th_path, threshold, scoring="balanced_accuracy")
     threshold_per_fold.append(threshold)
-    print(f"Fold {fold_idx+1} threshold (train_fit, balanced_accuracy): {threshold:.4f}")
+    plot_threshold_results(ttc, save_path=os.path.join(fold_run_manager.run_dir, "plots", "threshold_tuning.png"))
+    print(f"Fold {fold_idx+1} threshold (val_monitor, balanced_accuracy): {threshold:.4f}")
 
     print("?? Evaluating model on test set...")
     test_metrics = evaluate_model(

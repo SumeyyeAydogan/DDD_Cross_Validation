@@ -13,7 +13,8 @@ from src.model           import build_model
 from src.train           import train_model
 from src.utils           import plot_history, plot_metrics, plot_dataset_distribution
 from src.evaluate        import evaluate_model
-from src.threshold       import fit_threshold_for_fold, save_threshold
+from src.evaluation.threshold     import fit_threshold_on_dataset, save_threshold
+from src.visualization.threshold_plots import plot_threshold_results
 from src.gradcam_analysis import analyze_tf_keras_gradcam
 from src.run_manager     import RunManager
 from src.callbacks       import get_training_callbacks, get_time_history, summarize_epoch_times
@@ -44,19 +45,21 @@ if __name__ == "__main__":
 
     # 2) Folder where split data will go
     class_names = ("NotDrowsy", "Drowsy")
-    output_dir = os.path.join(project_root, "fold_datasets_v2")
+    output_dir = os.path.join(project_root, "fold_datasets_debug")
     os.makedirs(output_dir, exist_ok=True)
-    #save_fold_datasets(raw_dir, 5, (224, 224), 42, class_names, output_dir, val_ratio=0.15, split_method="stratified_round_robin")
+    #save_fold_datasets(raw_dir, 5, (224, 224), 42, class_names, output_dir, val_ratio=0.15)
+    #split_method="stratified_round_robin"
     
     # 4) EXPERIMENT CONFIGURATION
     # ============================================================
     # Training uses the base pipeline and optional GradCAM weights.
     # ============================================================
 
-    GRADCAM_WEIGHTS_FILE = os.path.join(project_root, "weights", "fold_1_weights.json")
+    GRADCAM_WEIGHTS_FILE = os.path.join(project_root, "weights", "fold_1_weights--.json")
     
     # Create run name based on configuration
-    run_name = "reward_30-fold1_eagerly-false_pre-model_cv-dataloader_seed"
+    run_name = "debug_baseline"
+    #"reward_30-fold1_eagerly-false_pre-model_cv-dataloader_seed"
     
     # 5) Create run manager
     print("📁 Creating run manager...")
@@ -71,7 +74,7 @@ if __name__ == "__main__":
     
     # 4.1) Create datasets for fold (fold_idx is 0-based → 0 == fold_1.json)
     batch_size = 32
-    fold_idx = 0
+    fold_idx = 4
     weights_path = GRADCAM_WEIGHTS_FILE if os.path.isfile(GRADCAM_WEIGHTS_FILE) else None
     if weights_path:
         print(f"Using sample weights: {weights_path}")
@@ -96,21 +99,7 @@ if __name__ == "__main__":
     print("=" * 50 + "\n")
     
     print("✅ Datasets loaded successfully!")
-    '''
-    # Debug dataset shapes (support (x,y) and (x,y,w))
-    def _print_batch_info(ds, name):
-        for batch in ds.take(2):
-            if isinstance(batch, (tuple, list)) and len(batch) == 3:
-                x_batch, y_batch, w_batch = batch
-                print(f"{name} x:", x_batch.shape, " y:", y_batch.shape, " w:", w_batch.shape)
-                print(tf.reduce_mean(y_batch), tf.reduce_mean(w_batch))
-            else:
-                x_batch, y_batch = batch
-                print(f"{name} x:", x_batch.shape, " y:", y_batch.shape)
-                print(tf.reduce_mean(y_batch))
 
-    _print_batch_info(train_ds, "train")
-    '''
     # 5.1) Plot dataset distribution
     # print("?? Analyzing dataset distribution...")
     # dist_plot_path = os.path.join(run_manager.run_dir, "plots", "dataset_distribution.png")
@@ -133,7 +122,7 @@ if __name__ == "__main__":
         print("?? Starting training from scratch")
 
     # 7) Save initial config
-    epoch_count = 30
+    epoch_count = 10
     config = {
         "run_name": run_manager.run_name,
         "epochs": epoch_count,
@@ -193,13 +182,14 @@ if __name__ == "__main__":
     metrics_plot_path = os.path.join(run_manager.run_dir, "plots", "training_metrics.png")
     plot_metrics(history, save_path=metrics_plot_path)
 
-    # 10) Threshold on train_fit, evaluate on test
+    # 10) Threshold on val_monitor_ds, evaluate on test
     th_path = os.path.join(run_manager.run_dir, "threshold.json")
-    threshold, th_source = fit_threshold_for_fold(
-        model, fold_idx, (224, 224), batch_size, 42, output_dir
+    threshold, ttc = fit_threshold_on_dataset(
+        model, val_monitor_ds, scoring="balanced_accuracy"
     )
-    save_threshold(th_path, threshold, source=th_source)
-    print(f"Threshold ({th_source}, balanced_accuracy): {threshold:.4f}")
+    save_threshold(th_path, threshold, scoring="balanced_accuracy")
+    plot_threshold_results(ttc, save_path=os.path.join(run_manager.run_dir, "plots", "threshold_tuning.png"))
+    print(f"Fold {fold_idx+1} threshold (val_monitor, balanced_accuracy): {threshold:.4f}")
 
     print("?? Evaluating model on test set...")
     evaluate_model(
